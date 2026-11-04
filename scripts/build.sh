@@ -38,7 +38,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>windowsqol-terminal</string></array></dict></array>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSAppleEventsUsageDescription</key><string>Windows QoL controls System Events for the Dock and Finder to open new windows.</string>
+<key>NSAppleEventsUsageDescription</key><string>Windows QoL controls System Events for the Dock and Finder and Terminal to open new windows.</string>
 </dict></plist>
 PLIST
 # Keep the designated requirement stable between local ad-hoc builds. This is

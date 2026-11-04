@@ -795,7 +795,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc func launchUtility(_ sender: NSButton) {
-        guard let bundle = sender.identifier?.rawValue,
+        guard let bundle = sender.identifier?.rawValue else { return }
+        if bundle == "com.apple.Terminal" {
+            // With no target window, Terminal creates a new window. `cd` uses the
+            // shell's home directory without touching existing Terminal sessions.
+            let source = "tell application id \"com.apple.Terminal\"\ndo script \"cd\"\nactivate\nend tell"
+            var error: NSDictionary?
+            NSAppleScript(source: source)?.executeAndReturnError(&error)
+            if let error = error {
+                let alert = NSAlert(); alert.messageText = "Couldn’t open a new Terminal window"
+                alert.informativeText = "Allow Windows QoL to control Terminal in System Settings → Privacy & Security → Automation, then try again.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
+                alert.runModal()
+            }
+            return
+        }
+        guard
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
