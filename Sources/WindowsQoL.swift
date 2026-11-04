@@ -99,7 +99,10 @@ final class AppIconButton: HoverButton {
         guard let icon = appIcon else { return }
         // NSButton draws in flipped coordinates: y = 0 is the top.
         if windowCount > 1 {
-            for origin in [NSPoint(x: 13, y: 4), NSPoint(x: 9, y: 8), NSPoint(x: 5, y: 12)] {
+            let origins = windowCount == 2
+                ? [NSPoint(x: 11, y: 6), NSPoint(x: 5, y: 12)]
+                : [NSPoint(x: 13, y: 4), NSPoint(x: 9, y: 8), NSPoint(x: 5, y: 12)]
+            for origin in origins {
                 icon.draw(in: NSRect(origin: origin, size: NSSize(width: 41, height: 41)), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             }
         } else {
@@ -271,8 +274,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         prepareDock()
         if let icon = NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: "Windows QoL") {
-            icon.isTemplate = true
-            status.button?.image = icon
+            let configured = icon.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)) ?? icon
+            configured.isTemplate = true
+            status.button?.image = configured
             status.button?.imagePosition = .imageOnly
         } else {
             status.button?.title = "▣"
