@@ -68,6 +68,104 @@ final class HoverButton: NSButton {
     override func mouseEntered(with event: NSEvent) { onHover?(self) }
 }
 
+// Translate selected Fn combinations; all other events pass through.
+final class WindowsShortcuts {
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    private var pressed = Set<Int64>()
+    private var screenshotUsesRegion = false
+    var isRunning: Bool { tap != nil }
+    func start() -> Bool {
+        if tap != nil { return true }
+        let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.keyUp.rawValue)
+        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, context in
+            guard let context = context else { return Unmanaged.passUnretained(event) }
+            return Unmanaged<WindowsShortcuts>.fromOpaque(context).takeUnretainedValue().handle(type, event)
+        }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        tap = port
+        source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
+        if let source = source { CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes) }
+        CGEvent.tapEnable(tap: port, enable: true)
+        return true
+    }
+    func stop() {
+        if let tap = tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
+        if let source = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        tap = nil; source = nil; pressed.removeAll()
+    }
+    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            pressed.removeAll()
+            return Unmanaged.passUnretained(event)
+        }
+        let key = event.getIntegerValueField(.keyboardEventKeycode)
+        // Physical macOS key codes: C, V, S, A, Z, Y, X, F, E.
+        guard [8, 9, 1, 0, 6, 16, 7, 3, 14].contains(key) else { return Unmanaged.passUnretained(event) }
+        if type == .keyDown {
+            let otherModifiers: CGEventFlags = key == 1 ? [.maskCommand, .maskControl, .maskAlternate] : [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+            guard event.flags.contains(.maskSecondaryFn), event.flags.intersection(otherModifiers).isEmpty else { return Unmanaged.passUnretained(event) }
+            if (key == 1 || key == 14) && event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
+            if key == 1 { screenshotUsesRegion = event.flags.contains(.maskShift) }
+            pressed.insert(key)
+        } else {
+            guard pressed.remove(key) != nil else { return Unmanaged.passUnretained(event) }
+        }
+        if key == 1 && !screenshotUsesRegion {
+            if type == .keyDown { capturePointerDisplay() }
+            return nil
+        }
+        if key == 14 {
+            if type == .keyDown {
+                DispatchQueue.main.async {
+                    var error: NSDictionary?
+                    NSAppleScript(source: "tell application \"Finder\"\nactivate\nmake new Finder window\nend tell")?.executeAndReturnError(&error)
+                    if let error = error {
+                        let alert = NSAlert()
+                        alert.messageText = "Couldn’t open a Finder window"
+                        alert.informativeText = "Allow Windows QoL to control Finder in System Settings → Privacy & Security → Automation, then try again.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
+                        alert.runModal()
+                    }
+                }
+            }
+            return nil
+        }
+        event.flags.remove(.maskSecondaryFn)
+        event.flags.insert(.maskCommand)
+        if key == 16 { // Fn-Y: redo is Command-Shift-Z in standard Mac apps.
+            event.setIntegerValueField(.keyboardEventKeycode, value: 6)
+            event.flags.insert(.maskShift)
+        }
+        if key == 1 {
+            event.setIntegerValueField(.keyboardEventKeycode, value: 21) // 4
+            event.flags.formUnion([.maskControl, .maskShift])
+        }
+        return Unmanaged.passUnretained(event)
+    }
+    private func capturePointerDisplay() {
+        guard let point = CGEvent(source: nil)?.location else { return }
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success,
+              let index = displays.prefix(Int(count)).firstIndex(where: { CGDisplayBounds($0).contains(point) }) else { return }
+        let capture = Process()
+        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        capture.arguments = ["-c", "-D", String(index + 1)]
+        capture.terminationHandler = { process in
+            if process.terminationStatus != 0 {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn’t capture the display"
+                    alert.informativeText = "Check Screen & System Audio Recording permission for Windows QoL, then try again."
+                    alert.runModal()
+                }
+            }
+        }
+        do { try capture.run() } catch { NSLog("Could not start screen capture: %@", error.localizedDescription) }
+    }
+}
+
 final class TaskbarPanel: NSPanel {
     init(screen: NSScreen) {
         let height: CGFloat = 52
@@ -92,6 +190,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hoverAnchor: NSRect = .zero
     var hoverPending: DispatchWorkItem?
     var hoverMonitor: Timer?
+    var permissionsWindow: NSWindow?
+    var accessibilityStatus: NSTextField?
+    var screenCaptureStatus: NSTextField?
+    let shortcuts = WindowsShortcuts()
+    let shortcutsKey = "fnShortcutsEnabled"
+    var shortcutsEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: shortcutsKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: shortcutsKey) }
+    }
     let pinnedKey = "pinnedApplications"
     let dockBackupKey = "dockDelayBackup"
     var pinned: [String] {
@@ -159,6 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if restartDock { runCommand("/usr/bin/killall", ["Dock"]) }
     }
     func applicationWillTerminate(_ notification: Notification) {
+        shortcuts.stop()
         let defaults = UserDefaults.standard
         let backup = defaults.dictionary(forKey: dockBackupKey)
         let (status, current) = runCommand("/usr/bin/defaults", ["read", "com.apple.dock", "autohide-delay"])
@@ -179,6 +287,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let permission = NSMenuItem(title: AXIsProcessTrusted() ? "Accessibility access enabled" : "Enable Accessibility access…", action: AXIsProcessTrusted() ? nil : #selector(requestAccess), keyEquivalent: "")
         permission.target = self; menu.addItem(permission)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showPermissions), keyEquivalent: ",")
+        settings.target = self; menu.addItem(settings)
+        let shortcutItem = NSMenuItem(title: "Windows-style Fn shortcuts", action: #selector(toggleShortcuts), keyEquivalent: "")
+        shortcutItem.target = self; shortcutItem.state = shortcutsEnabled ? .on : .off
+        menu.addItem(shortcutItem)
+        if shortcutsEnabled && !shortcuts.isRunning {
+            let warning = NSMenuItem(title: "Fn shortcuts unavailable — check Accessibility", action: nil, keyEquivalent: "")
+            menu.addItem(warning)
+        }
         let pin = NSMenuItem(title: "Pin frontmost app to primary bar", action: #selector(pinFrontmost), keyEquivalent: "")
         pin.target = self; menu.addItem(pin)
         let reset = NSMenuItem(title: "Reset pinned apps", action: #selector(resetPins), keyEquivalent: "")
@@ -188,6 +305,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reload.target = self; menu.addItem(reload)
         let quit = NSMenuItem(title: "Quit Windows QoL", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit); status.menu = menu
+    }
+    @objc func showPermissions() {
+        if let window = permissionsWindow {
+            updatePermissionStatuses()
+            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 292), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Windows QoL Settings"; window.isReleasedWhenClosed = false
+        let title = NSTextField(labelWithString: "Permissions")
+        title.font = .boldSystemFont(ofSize: 19); title.frame = NSRect(x: 24, y: 248, width: 490, height: 26)
+        let accessibility = NSTextField(wrappingLabelWithString: "Accessibility — needed for window controls and Fn shortcuts.")
+        accessibility.frame = NSRect(x: 24, y: 192, width: 465, height: 38)
+        let axStatus = NSTextField(labelWithString: ""); axStatus.frame = NSRect(x: 24, y: 166, width: 270, height: 20)
+        let axButton = NSButton(title: "Enable…", target: self, action: #selector(requestAccessibilityFromSettings))
+        axButton.bezelStyle = .rounded; axButton.frame = NSRect(x: 390, y: 161, width: 125, height: 30)
+        let screen = NSTextField(wrappingLabelWithString: "Screen capture — needed to copy the display under your pointer. This grants broader screen access.")
+        screen.frame = NSRect(x: 24, y: 100, width: 465, height: 43)
+        let captureStatus = NSTextField(labelWithString: ""); captureStatus.frame = NSRect(x: 24, y: 72, width: 280, height: 20)
+        let captureButton = NSButton(title: "Enable…", target: self, action: #selector(requestScreenCaptureFromSettings))
+        captureButton.bezelStyle = .rounded; captureButton.frame = NSRect(x: 390, y: 67, width: 125, height: 30)
+        let note = NSTextField(labelWithString: "macOS manages permissions; changes may require reopening the app.")
+        note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 11); note.frame = NSRect(x: 24, y: 22, width: 495, height: 18)
+        for view in [title, accessibility, axStatus, axButton, screen, captureStatus, captureButton, note] as [NSView] { window.contentView?.addSubview(view) }
+        accessibilityStatus = axStatus; screenCaptureStatus = captureStatus; permissionsWindow = window
+        updatePermissionStatuses(); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    func updatePermissionStatuses() {
+        accessibilityStatus?.stringValue = AXIsProcessTrusted() ? "Status: Enabled" : "Status: Not enabled"
+        screenCaptureStatus?.stringValue = CGPreflightScreenCaptureAccess() ? "Status: Enabled" : "Status: Not enabled"
+    }
+    @objc func requestAccessibilityFromSettings() {
+        requestAccess()
+        if !AXIsProcessTrusted(), let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+        updatePermissionStatuses()
+    }
+    @objc func requestScreenCaptureFromSettings() {
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+            if !CGPreflightScreenCaptureAccess(), let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+        }
+        updatePermissionStatuses()
+    }
+    @objc func toggleShortcuts() {
+        shortcutsEnabled.toggle()
+        if shortcutsEnabled && AXIsProcessTrusted() { _ = shortcuts.start() } else { shortcuts.stop() }
+        rebuildMenu()
     }
     @objc func reloadApp() {
         let helper = Process()
@@ -216,7 +380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func resetPins() { UserDefaults.standard.removeObject(forKey: pinnedKey); signature = ""; refresh() }
     @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; refresh() }
     @objc func refresh() {
+        if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
         let trusted = AXIsProcessTrusted()
+        if shortcutsEnabled && trusted && !shortcuts.isRunning, shortcuts.start() { signature = "" }
+        if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
         let state = "\(trusted)|\(pinned.joined(separator: ","))|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized)" }.sorted().joined(separator: "|")
         guard state != signature else { return }
