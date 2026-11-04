@@ -237,6 +237,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hoverMonitor: Timer?
     var hoverLastInside = Date()
     var permissionsWindow: NSWindow?
+    var settingsContent: NSView?
+    var sidebarButtons: [NSButton] = []
+    var selectedSettingsCategory = 0
+    var lastExternalApplication: NSRunningApplication?
+    var shortcutStatusLabel: NSTextField?
     var accessibilityStatus: NSTextField?
     var screenCaptureStatus: NSTextField?
     var loginStatusLabel: NSTextField?
@@ -256,6 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        lastExternalApplication = NSWorkspace.shared.frontmostApplication
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(applicationActivated(_:)), name: NSWorkspace.didActivateApplicationNotification, object: nil)
         let defaults = UserDefaults.standard
         if let previous = defaults.persistentDomain(forName: "local.dan.windows-qol") {
             for key in [pinnedKey, dockBackupKey] where defaults.object(forKey: key) == nil {
@@ -263,7 +270,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         prepareDock()
-        status.button?.title = "▣"
+        if let icon = NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: "Windows QoL") {
+            icon.isTemplate = true
+            status.button?.image = icon
+            status.button?.imagePosition = .imageOnly
+        } else {
+            status.button?.title = "▣"
+        }
+        status.button?.toolTip = "Windows QoL"
         rebuildMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         refresh()
@@ -333,60 +347,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func rebuildMenu() {
         let menu = NSMenu()
-        let permission = NSMenuItem(title: AXIsProcessTrusted() ? "Accessibility access enabled" : "Enable Accessibility access…", action: AXIsProcessTrusted() ? nil : #selector(requestAccess), keyEquivalent: "")
-        permission.target = self; menu.addItem(permission)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showPermissions), keyEquivalent: ",")
-        settings.target = self; menu.addItem(settings)
-        let shortcutItem = NSMenuItem(title: "Windows-style Fn shortcuts", action: #selector(toggleShortcuts), keyEquivalent: "")
-        shortcutItem.target = self; shortcutItem.state = shortcutsEnabled ? .on : .off
-        menu.addItem(shortcutItem)
-        if shortcutsEnabled && !shortcuts.isRunning {
-            let warning = NSMenuItem(title: "Fn shortcuts unavailable — check Accessibility", action: nil, keyEquivalent: "")
-            menu.addItem(warning)
-        }
-        let pin = NSMenuItem(title: "Pin frontmost app to primary bar", action: #selector(pinFrontmost), keyEquivalent: "")
-        pin.target = self; menu.addItem(pin)
-        let reset = NSMenuItem(title: "Reset pinned apps", action: #selector(resetPins), keyEquivalent: "")
-        reset.target = self; menu.addItem(reset)
+        settings.target = self
+        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        menu.addItem(settings)
         menu.addItem(.separator())
         let reload = NSMenuItem(title: "Reload Windows QoL", action: #selector(reloadApp), keyEquivalent: "")
-        reload.target = self; menu.addItem(reload)
+        reload.target = self
+        reload.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        menu.addItem(reload)
         let quit = NSMenuItem(title: "Quit Windows QoL", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quit); status.menu = menu
     }
+    @objc func applicationActivated(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        lastExternalApplication = app
+    }
     @objc func showPermissions() {
+        if let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier != Bundle.main.bundleIdentifier {
+            lastExternalApplication = app
+        }
         if let window = permissionsWindow {
-            updatePermissionStatuses()
+            displaySettingsCategory(selectedSettingsCategory)
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 382), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 710, height: 420), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Windows QoL Settings"; window.isReleasedWhenClosed = false
-        let general = NSTextField(labelWithString: "Startup")
-        general.font = .boldSystemFont(ofSize: 19); general.frame = NSRect(x: 24, y: 338, width: 490, height: 26)
-        let loginStatus = NSTextField(labelWithString: ""); loginStatus.frame = NSRect(x: 24, y: 307, width: 350, height: 20)
-        let login = NSButton(title: "Enable", target: self, action: #selector(toggleLaunchAtLogin))
-        login.bezelStyle = .rounded; login.frame = NSRect(x: 365, y: 302, width: 150, height: 30)
-        let title = NSTextField(labelWithString: "Permissions")
-        title.font = .boldSystemFont(ofSize: 19); title.frame = NSRect(x: 24, y: 248, width: 490, height: 26)
-        let accessibility = NSTextField(wrappingLabelWithString: "Accessibility — needed for window controls and Fn shortcuts.")
-        accessibility.frame = NSRect(x: 24, y: 192, width: 465, height: 38)
-        let axStatus = NSTextField(labelWithString: ""); axStatus.frame = NSRect(x: 24, y: 166, width: 270, height: 20)
-        let axButton = NSButton(title: "Enable…", target: self, action: #selector(requestAccessibilityFromSettings))
-        axButton.bezelStyle = .rounded; axButton.frame = NSRect(x: 390, y: 161, width: 125, height: 30)
-        let screen = NSTextField(wrappingLabelWithString: "Screen capture — needed to copy the display under your pointer. This grants broader screen access.")
-        screen.frame = NSRect(x: 24, y: 100, width: 465, height: 43)
-        let captureStatus = NSTextField(labelWithString: ""); captureStatus.frame = NSRect(x: 24, y: 72, width: 280, height: 20)
-        let captureButton = NSButton(title: "Enable…", target: self, action: #selector(requestScreenCaptureFromSettings))
-        captureButton.bezelStyle = .rounded; captureButton.frame = NSRect(x: 390, y: 67, width: 125, height: 30)
-        let note = NSTextField(labelWithString: "macOS manages permissions; changes may require reopening the app.")
-        note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 11); note.frame = NSRect(x: 24, y: 22, width: 495, height: 18)
-        for view in [general, loginStatus, login, title, accessibility, axStatus, axButton, screen, captureStatus, captureButton, note] as [NSView] { window.contentView?.addSubview(view) }
-        loginStatusLabel = loginStatus; loginButton = login
-        accessibilityStatus = axStatus; screenCaptureStatus = captureStatus; permissionsWindow = window
-        updatePermissionStatuses(); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 190, height: 420))
+        sidebar.material = .sidebar; sidebar.blendingMode = .behindWindow; sidebar.state = .active
+        let categories = [("General", "gearshape"), ("Taskbar", "rectangle.bottomthird.inset.filled"), ("Shortcuts", "keyboard"), ("Permissions", "lock.shield")]
+        sidebarButtons = []
+        for (index, category) in categories.enumerated() {
+            let button = NSButton(title: category.0, target: self, action: #selector(selectSettingsCategory(_:)))
+            button.frame = NSRect(x: 12, y: 354 - CGFloat(index) * 39, width: 166, height: 32)
+            button.tag = index; button.bezelStyle = .regularSquare; button.isBordered = false; button.alignment = .left
+            button.image = NSImage(systemSymbolName: category.1, accessibilityDescription: nil); button.imagePosition = .imageLeading
+            button.imageHugsTitle = false; button.wantsLayer = true; button.layer?.cornerRadius = 6
+            sidebar.addSubview(button); sidebarButtons.append(button)
+        }
+        let content = NSView(frame: NSRect(x: 190, y: 0, width: 520, height: 420))
+        window.contentView?.addSubview(sidebar); window.contentView?.addSubview(content)
+        settingsContent = content; permissionsWindow = window
+        displaySettingsCategory(0)
+        window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc func selectSettingsCategory(_ sender: NSButton) { displaySettingsCategory(sender.tag) }
+    func displaySettingsCategory(_ category: Int) {
+        guard let content = settingsContent else { return }
+        selectedSettingsCategory = category
+        content.subviews.forEach { $0.removeFromSuperview() }
+        accessibilityStatus = nil; screenCaptureStatus = nil; loginStatusLabel = nil; loginButton = nil; shortcutStatusLabel = nil
+        for button in sidebarButtons {
+            button.layer?.backgroundColor = (button.tag == category ? NSColor.controlAccentColor.withAlphaComponent(0.22) : NSColor.clear).cgColor
+        }
+        func heading(_ text: String) {
+            let label = NSTextField(labelWithString: text); label.font = .boldSystemFont(ofSize: 22)
+            label.frame = NSRect(x: 30, y: 361, width: 460, height: 30); content.addSubview(label)
+        }
+        func text(_ value: String, y: CGFloat, height: CGFloat = 38) {
+            let label = NSTextField(wrappingLabelWithString: value); label.font = .systemFont(ofSize: 13)
+            label.frame = NSRect(x: 30, y: y, width: 450, height: height); content.addSubview(label)
+        }
+        func button(_ title: String, y: CGFloat, action: Selector, width: CGFloat = 165) -> NSButton {
+            let control = NSButton(title: title, target: self, action: action)
+            control.bezelStyle = .rounded; control.frame = NSRect(x: 26, y: y, width: width, height: 32)
+            content.addSubview(control); return control
+        }
+        switch category {
+        case 0:
+            heading("General")
+            text("Start Windows QoL automatically when you log in to your Mac.", y: 296)
+            let state = NSTextField(labelWithString: ""); state.frame = NSRect(x: 30, y: 264, width: 360, height: 20); content.addSubview(state)
+            loginStatusLabel = state; loginButton = button("Enable", y: 218, action: #selector(toggleLaunchAtLogin))
+            text("macOS may ask you to approve this in Login Items & Extensions.", y: 160)
+        case 1:
+            heading("Taskbar")
+            text("Pin your most recently used app to the primary taskbar, or right-click any taskbar icon to pin or unpin it.", y: 282, height: 56)
+            let name = lastExternalApplication?.localizedName ?? "No app selected"
+            text("Last used app: \(name)", y: 250, height: 22)
+            let pin = button("Pin last used app", y: 204, action: #selector(pinFrontmost), width: 175)
+            pin.isEnabled = lastExternalApplication?.bundleIdentifier != nil
+            text("Restore the default pinned apps (Finder and Safari).", y: 146)
+            _ = button("Reset pinned apps", y: 101, action: #selector(resetPins), width: 175)
+        case 2:
+            heading("Shortcuts")
+            let toggle = NSButton(checkboxWithTitle: "Enable Windows-style Fn shortcuts", target: self, action: #selector(toggleShortcuts))
+            toggle.state = shortcutsEnabled ? .on : .off; toggle.frame = NSRect(x: 30, y: 302, width: 440, height: 28); content.addSubview(toggle)
+            let state = NSTextField(labelWithString: ""); state.textColor = .secondaryLabelColor; state.font = .systemFont(ofSize: 11)
+            state.frame = NSRect(x: 30, y: 287, width: 450, height: 16); content.addSubview(state); shortcutStatusLabel = state
+            text("Fn-C/V/X: copy, paste, cut. Fn-A: select all. Fn-Z/Y: undo and redo. Fn-F: find. Fn-E: new Finder window.", y: 214, height: 72)
+            text("Fn-S: screenshot of the current display. Fn-Shift-S: select an area. Both copy to the clipboard.", y: 145, height: 55)
+            text("Fn-C and Fn-A replace macOS shortcuts while enabled.", y: 95)
+        default:
+            heading("Permissions")
+            text("Accessibility is needed for window controls and Fn shortcuts.", y: 300)
+            let ax = NSTextField(labelWithString: ""); ax.frame = NSRect(x: 30, y: 268, width: 280, height: 20); content.addSubview(ax)
+            accessibilityStatus = ax; _ = button("Enable Accessibility…", y: 223, action: #selector(requestAccessibilityFromSettings), width: 190)
+            text("Screen capture is needed for screenshots and previews. It grants broader screen access.", y: 149, height: 50)
+            let capture = NSTextField(labelWithString: ""); capture.frame = NSRect(x: 30, y: 120, width: 280, height: 20); content.addSubview(capture)
+            screenCaptureStatus = capture; _ = button("Enable Screen Capture…", y: 74, action: #selector(requestScreenCaptureFromSettings), width: 210)
+            text("macOS manages permissions; changes may require reopening the app.", y: 22)
+        }
+        updatePermissionStatuses()
     }
     func updatePermissionStatuses() {
+        shortcutStatusLabel?.stringValue = shortcutsEnabled ? (shortcuts.isRunning ? "Status: Active" : "Status: Unavailable — check Accessibility permission") : "Status: Off"
         accessibilityStatus?.stringValue = AXIsProcessTrusted() ? "Status: Enabled" : "Status: Not enabled"
         screenCaptureStatus?.stringValue = CGPreflightScreenCaptureAccess() ? "Status: Enabled" : "Status: Not enabled"
         if #available(macOS 13.0, *) {
@@ -435,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func toggleShortcuts() {
         shortcutsEnabled.toggle()
         if shortcutsEnabled && AXIsProcessTrusted() { _ = shortcuts.start() } else { shortcuts.stop() }
-        rebuildMenu()
+        updatePermissionStatuses(); rebuildMenu()
     }
     @objc func reloadApp() {
         let helper = Process()
@@ -457,7 +525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = AXIsProcessTrustedWithOptions(options)
     }
     @objc func pinFrontmost() {
-        guard let app = NSWorkspace.shared.frontmostApplication, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier else { return }
+        guard let app = lastExternalApplication, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier else { return }
         if !pinned.contains(id) { pinned.append(id) }
         refresh()
     }
