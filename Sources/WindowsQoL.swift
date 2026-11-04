@@ -116,6 +116,133 @@ final class AppIconButton: HoverButton {
     }
 }
 
+// macOS Zoom behaves differently between apps (notably Finder). Intercept only
+// unmodified title-bar double clicks and retain each window's previous frame.
+final class TitlebarZoom {
+    private struct SavedFrame { let window: AXUIElement; let frame: CGRect }
+    private struct Animation { let window: AXUIElement; let target: CGRect; let timer: Timer }
+    private var saved: [SavedFrame] = []
+    private var animations: [Animation] = []
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    private var swallowMouseUp = false
+    var isRunning: Bool { tap != nil }
+
+    func start() -> Bool {
+        if tap != nil { return true }
+        let mask = (CGEventMask(1) << CGEventType.leftMouseDown.rawValue) | (CGEventMask(1) << CGEventType.leftMouseUp.rawValue)
+        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, context in
+            guard let context = context else { return Unmanaged.passUnretained(event) }
+            return Unmanaged<TitlebarZoom>.fromOpaque(context).takeUnretainedValue().handle(type, event)
+        }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        tap = port; source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
+        if let source = source { CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes) }
+        CGEvent.tapEnable(tap: port, enable: true)
+        return true
+    }
+    func stop() {
+        animations.forEach { $0.timer.invalidate() }; animations.removeAll()
+        if let tap = tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
+        if let source = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        tap = nil; source = nil; swallowMouseUp = false
+    }
+    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            swallowMouseUp = false
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .leftMouseUp && swallowMouseUp { swallowMouseUp = false; return nil }
+        let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
+        guard type == .leftMouseDown, event.getIntegerValueField(.mouseEventClickState) == 2,
+              event.flags.intersection(modifiers).isEmpty,
+              let window = titlebarWindow(at: event.location) else { return Unmanaged.passUnretained(event) }
+        swallowMouseUp = true
+        DispatchQueue.main.async { [weak self] in self?.toggle(window) }
+        return nil
+    }
+    private func titlebarWindow(at point: CGPoint) -> AXUIElement? {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+              var element = hit else { return nil }
+        let interactive: Set<String> = ["AXButton", "AXTextField", "AXTextArea", "AXPopUpButton", "AXCheckBox", "AXRadioButton", "AXTab", "AXMenuButton", "AXLink", "AXSlider"]
+        for _ in 0..<12 {
+            let role: String = attribute(element, kAXRoleAttribute as CFString) ?? ""
+            if interactive.contains(role) { return nil }
+            if role == kAXWindowRole as String {
+                let fullscreen: Bool = attribute(element, "AXFullScreen" as CFString) ?? false
+                guard !fullscreen, let rect = windowRect(element), point.y >= rect.minY, point.y <= rect.minY + 28,
+                      point.x >= rect.minX + 75, point.x <= rect.maxX - 10 else { return nil }
+                return element
+            }
+            guard let parent: AXUIElement = attribute(element, kAXParentAttribute as CFString) else { return nil }
+            element = parent
+        }
+        return nil
+    }
+    private func toggle(_ window: AXUIElement) {
+        guard let current = windowRect(window) else { return }
+        let screens = NSScreen.screens.compactMap { screen -> (NSScreen, CGRect)? in
+            guard let id = displayID(screen) else { return nil }
+            return (screen, CGDisplayBounds(id))
+        }
+        guard let (screen, display) = screens.max(by: { a, b in
+            let aa = a.1.intersection(current); let bb = b.1.intersection(current)
+            return (aa.isNull ? 0 : aa.width * aa.height) < (bb.isNull ? 0 : bb.width * bb.height)
+        }), !display.intersection(current).isEmpty else { return }
+        let visible = screen.visibleFrame
+        let topInset = screen.frame.maxY - visible.maxY
+        let leftInset = visible.minX - screen.frame.minX
+        let bottomInset = max(taskbarHeight, visible.minY - screen.frame.minY)
+        let target = CGRect(x: display.minX + leftInset, y: display.minY + topInset,
+                            width: visible.width, height: display.height - topInset - bottomInset)
+        guard target.width > 100, target.height > 100 else { return }
+        func near(_ a: CGRect, _ b: CGRect) -> Bool {
+            abs(a.minX - b.minX) < 14 && abs(a.minY - b.minY) < 14 && abs(a.width - b.width) < 14 && abs(a.height - b.height) < 14
+        }
+        let active = animations.first { CFEqual($0.window, window) }
+        active?.timer.invalidate()
+        animations.removeAll { CFEqual($0.window, window) }
+        let existing = saved.firstIndex { CFEqual($0.window, window) }
+        let destination: CGRect
+        if near(current, target) || active.map({ near($0.target, target) }) == true {
+            if let existing = existing { destination = saved.remove(at: existing).frame }
+            else {
+                let width = target.width * 0.72, height = target.height * 0.72
+                destination = CGRect(x: target.midX - width / 2, y: target.midY - height / 2, width: width, height: height)
+            }
+        } else {
+            if let existing = existing { saved.remove(at: existing) }
+            saved.append(SavedFrame(window: window, frame: current))
+            if saved.count > 200 { saved.removeFirst() }
+            destination = target
+        }
+        animate(window, from: current, to: destination)
+    }
+    private func animate(_ window: AXUIElement, from start: CGRect, to end: CGRect) {
+        let started = ProcessInfo.processInfo.systemUptime
+        let duration = 0.22
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] timer in
+            let progress = min(1.0, (ProcessInfo.processInfo.systemUptime - started) / duration)
+            let eased = 1 - pow(1 - progress, 3)
+            func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * eased }
+            var point = CGPoint(x: lerp(start.minX, end.minX), y: lerp(start.minY, end.minY))
+            var size = CGSize(width: lerp(start.width, end.width), height: lerp(start.height, end.height))
+            guard let position = AXValueCreate(.cgPoint, &point), let dimensions = AXValueCreate(.cgSize, &size) else {
+                timer.invalidate(); self?.animations.removeAll { $0.timer === timer }; return
+            }
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+            let result = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, dimensions)
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+            if progress >= 1 || result != .success {
+                timer.invalidate(); self?.animations.removeAll { $0.timer === timer }
+            }
+        }
+        animations.append(Animation(window: window, target: end, timer: timer))
+        RunLoop.main.add(timer, forMode: .common)
+    }
+}
+
 // Translate selected Fn combinations; all other events pass through.
 final class WindowsShortcuts {
     private var tap: CFMachPort?
@@ -250,6 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var loginStatusLabel: NSTextField?
     var loginButton: NSButton?
     let shortcuts = WindowsShortcuts()
+    let titlebarZoom = TitlebarZoom()
     let shortcutsKey = "fnShortcutsEnabled"
     var shortcutsEnabled: Bool {
         get { UserDefaults.standard.object(forKey: shortcutsKey) as? Bool ?? true }
@@ -333,6 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationWillTerminate(_ notification: Notification) {
         shortcuts.stop()
+        titlebarZoom.stop()
         let defaults = UserDefaults.standard
         let backup = defaults.dictionary(forKey: dockBackupKey)
         let (status, current) = runCommand("/usr/bin/defaults", ["read", "com.apple.dock", "autohide-delay"])
@@ -538,6 +667,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func refresh() {
         if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
         let trusted = AXIsProcessTrusted()
+        if trusted && !titlebarZoom.isRunning { _ = titlebarZoom.start() }
+        if !trusted && titlebarZoom.isRunning { titlebarZoom.stop() }
         if shortcutsEnabled && trusted && !shortcuts.isRunning, shortcuts.start() { signature = "" }
         if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
