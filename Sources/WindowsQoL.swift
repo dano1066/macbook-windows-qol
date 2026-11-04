@@ -2,6 +2,8 @@ import AppKit
 import ApplicationServices
 import ScreenCaptureKit
 
+let taskbarHeight: CGFloat = 72
+
 // A small, extensible host for desktop features. The taskbar is the first feature.
 struct WindowRecord {
     let app: NSRunningApplication
@@ -210,7 +212,7 @@ final class WindowsShortcuts {
 
 final class TaskbarPanel: NSPanel {
     init(screen: NSScreen) {
-        let height: CGFloat = 72
+        let height = taskbarHeight
         super.init(contentRect: NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.94)
@@ -428,6 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if shortcutsEnabled && trusted && !shortcuts.isRunning, shortcuts.start() { signature = "" }
         if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
+        if trusted { keepMaximizedWindowsAboveTaskbars() }
         let state = "\(trusted)|\(pinned.joined(separator: ","))|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized):\(isActive($0))" }.sorted().joined(separator: "|")
         guard state != signature else { return }
         signature = state
@@ -438,8 +441,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let id = displayID(screen) else { continue }
             let panel = panels[id] ?? TaskbarPanel(screen: screen)
             panels[id] = panel
-            panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: 72), display: false)
-            let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: 72))
+            panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: taskbarHeight), display: false)
+            let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: taskbarHeight))
             let utilityIDs = ["com.apple.Terminal", "com.apple.systempreferences"]
             var ids: [String] = id == primary ? pinned : []
             let local = records.filter { $0.displayID == id }
@@ -505,6 +508,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dockButton.target = self; dockButton.action = #selector(toggleDockAutoHide)
             bar.addSubview(dockButton)
             panel.contentView = bar; panel.orderFrontRegardless()
+        }
+    }
+    func keepMaximizedWindowsAboveTaskbars() {
+        // macOS does not reserve desktop space for third-party taskbar panels.
+        // Adjust only windows that span nearly the full usable display height,
+        // after the user has finished dragging or resizing.
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        for record in records where !record.minimized {
+            guard let screen = NSScreen.screens.first(where: { displayID($0) == record.displayID }),
+                  let rect = windowRect(record.element),
+                  (attribute(record.element, "AXFullScreen" as CFString, as: Bool.self) ?? false) == false,
+                  (attribute(record.element, kAXSubroleAttribute as CFString, as: String.self) ?? "") == kAXStandardWindowSubrole as String else { continue }
+            let display = CGDisplayBounds(record.displayID)
+            let topInset = screen.frame.maxY - screen.visibleFrame.maxY
+            let usableTop = display.minY + topInset
+            let taskbarTop = display.maxY - taskbarHeight
+            guard abs(rect.minY - usableTop) <= 24,
+                  abs(rect.maxY - display.maxY) <= 24,
+                  rect.height >= display.height * 0.70,
+                  rect.maxY > taskbarTop + 1 else { continue }
+            var size = CGSize(width: rect.width, height: taskbarTop - rect.minY)
+            guard size.height > 100, let value = AXValueCreate(.cgSize, &size) else { continue }
+            AXUIElementSetAttributeValue(record.element, kAXSizeAttribute as CFString, value)
         }
     }
     @objc func launchUtility(_ sender: NSButton) {
