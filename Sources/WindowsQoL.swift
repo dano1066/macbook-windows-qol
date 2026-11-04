@@ -72,15 +72,40 @@ class HoverButton: NSButton {
 final class AppIconButton: HoverButton {
     var appIcon: NSImage?
     var windowCount = 0
+    var hasVisibleWindow = false
+    var isFocused = false
+    var contextMenu: (() -> NSMenu)?
+    var onReorder: ((CGFloat) -> Void)?
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
+    override func mouseDown(with event: NSEvent) {
+        guard let window = window else { return }
+        let start = window.convertPoint(toScreen: event.locationInWindow)
+        var dragging = false
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let point = window.convertPoint(toScreen: next.locationInWindow)
+            if next.type == .leftMouseDragged && abs(point.x - start.x) > 8 { dragging = true }
+            if next.type == .leftMouseUp {
+                if dragging { onReorder?(point.x) }
+                else if bounds.contains(convert(next.locationInWindow, from: nil)) { performClick(nil) }
+                break
+            }
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let icon = appIcon else { return }
+        // NSButton draws in flipped coordinates: y = 0 is the top.
         if windowCount > 1 {
-            icon.draw(in: NSRect(x: 13, y: 10, width: 27, height: 27), from: .zero, operation: .sourceOver, fraction: 0.50)
-            icon.draw(in: NSRect(x: 9, y: 7, width: 29, height: 29), from: .zero, operation: .sourceOver, fraction: 0.75)
-            icon.draw(in: NSRect(x: 4, y: 3, width: 32, height: 32))
+            for origin in [NSPoint(x: 13, y: 4), NSPoint(x: 9, y: 8), NSPoint(x: 5, y: 12)] {
+                icon.draw(in: NSRect(origin: origin, size: NSSize(width: 41, height: 41)), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
         } else {
-            icon.draw(in: NSRect(x: 3, y: 3, width: 38, height: 38))
+            icon.draw(in: NSRect(x: 6, y: 9, width: 46, height: 46), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
+        if windowCount > 0 {
+            (isFocused ? NSColor.systemCyan : (hasVisibleWindow ? NSColor.systemBlue : NSColor.systemBlue.withAlphaComponent(0.45))).setFill()
+            let lineHeight: CGFloat = hasVisibleWindow ? 5 : 3
+            NSBezierPath(roundedRect: NSRect(x: 10, y: bounds.height - lineHeight - 2, width: 38, height: lineHeight), xRadius: lineHeight / 2, yRadius: lineHeight / 2).fill()
         }
     }
 }
@@ -185,7 +210,7 @@ final class WindowsShortcuts {
 
 final class TaskbarPanel: NSPanel {
     init(screen: NSScreen) {
-        let height: CGFloat = 52
+        let height: CGFloat = 72
         super.init(contentRect: NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.94)
@@ -403,7 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if shortcutsEnabled && trusted && !shortcuts.isRunning, shortcuts.start() { signature = "" }
         if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
-        let state = "\(trusted)|\(pinned.joined(separator: ","))|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized)" }.sorted().joined(separator: "|")
+        let state = "\(trusted)|\(pinned.joined(separator: ","))|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized):\(isActive($0))" }.sorted().joined(separator: "|")
         guard state != signature else { return }
         signature = state
         closeHover()
@@ -413,8 +438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let id = displayID(screen) else { continue }
             let panel = panels[id] ?? TaskbarPanel(screen: screen)
             panels[id] = panel
-            panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: 52), display: false)
-            let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: 52))
+            panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: 72), display: false)
+            let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: 72))
             let utilityIDs = ["com.apple.Terminal", "com.apple.systempreferences"]
             var ids: [String] = id == primary ? pinned : []
             let local = records.filter { $0.displayID == id }
@@ -423,31 +448,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             var x: CGFloat = 8
             for bundle in ids {
-                guard x + 46 <= screen.frame.width - 200 else { break }
+                guard x + 58 <= screen.frame.width - 200 else { break }
                 let app = local.first { $0.app.bundleIdentifier == bundle }?.app
                 let url = app?.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
                 guard let appURL = url else { continue }
-                let button = AppIconButton(frame: NSRect(x: x, y: 5, width: 44, height: 42))
+                let button = AppIconButton(frame: NSRect(x: x, y: 3, width: 58, height: 66))
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 button.appIcon = NSWorkspace.shared.icon(forFile: appURL.path)
-                button.windowCount = local.filter { $0.app.bundleIdentifier == bundle }.count
+                let localWindows = local.filter { $0.app.bundleIdentifier == bundle }
+                button.windowCount = localWindows.count
+                button.hasVisibleWindow = localWindows.contains { !$0.minimized }
+                button.isFocused = localWindows.contains { isActive($0) }
                 button.toolTip = app?.localizedName ?? FileManager.default.displayName(atPath: appURL.path)
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
                 button.target = self; button.action = #selector(appClicked(_:))
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
+                button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle) ?? NSMenu() }
+                if id == primary && pinned.contains(bundle) {
+                    let leftEdge = screen.frame.minX + 8
+                    button.onReorder = { [weak self] screenX in self?.reorderPin(bundle, targetX: screenX - leftEdge) }
+                }
                 bar.addSubview(button)
-                x += 48
+                x += 62
             }
             if !trusted {
                 let label = NSTextField(labelWithString: "Accessibility needed: remove and re-add Windows QoL in System Settings")
                 label.textColor = .white; label.font = .systemFont(ofSize: 12)
-                label.frame = NSRect(x: x + 8, y: 17, width: max(0, screen.frame.width - x - 216), height: 18)
+                label.frame = NSRect(x: x + 8, y: 27, width: max(0, screen.frame.width - x - 216), height: 18)
                 bar.addSubview(label)
             }
             for (index, bundle) in utilityIDs.enumerated() {
                 guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil else { continue }
                 let utilityX = max(0, screen.frame.width - 196 + CGFloat(index) * 48)
-                let button = NSButton(frame: NSRect(x: utilityX, y: 5, width: 44, height: 42))
+                let button = NSButton(frame: NSRect(x: utilityX, y: 15, width: 44, height: 42))
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 button.toolTip = bundle == "com.apple.Terminal" ? "Terminal" : "System Settings"
                 button.image = NSImage(systemSymbolName: bundle == "com.apple.Terminal" ? "terminal" : "gearshape", accessibilityDescription: button.toolTip)
@@ -457,14 +490,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.target = self; button.action = #selector(launchUtility(_:))
                 bar.addSubview(button)
             }
-            let trash = NSButton(frame: NSRect(x: max(0, screen.frame.width - 100), y: 5, width: 44, height: 42))
+            let trash = NSButton(frame: NSRect(x: max(0, screen.frame.width - 100), y: 15, width: 44, height: 42))
             trash.bezelStyle = .regularSquare; trash.isBordered = false
             trash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Trash")
             trash.imagePosition = .imageOnly; trash.imageScaling = .scaleProportionallyDown
             trash.contentTintColor = .white; trash.toolTip = "Open Trash"
             trash.target = self; trash.action = #selector(openTrash)
             bar.addSubview(trash)
-            let dockButton = NSButton(frame: NSRect(x: max(0, screen.frame.width - 52), y: 5, width: 44, height: 42))
+            let dockButton = NSButton(frame: NSRect(x: max(0, screen.frame.width - 52), y: 15, width: 44, height: 42))
             dockButton.bezelStyle = .regularSquare; dockButton.isBordered = false
             dockButton.image = NSImage(systemSymbolName: "dock.rectangle", accessibilityDescription: "Toggle Dock auto-hide")
             dockButton.contentTintColor = .white
@@ -478,6 +511,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let bundle = sender.identifier?.rawValue,
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+    func appContextMenu(bundle: String) -> NSMenu {
+        let menu = NSMenu()
+        let item = NSMenuItem(title: pinned.contains(bundle) ? "Unpin from taskbar" : "Pin to primary taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
+        item.target = self; item.representedObject = bundle; menu.addItem(item)
+        return menu
+    }
+    @objc func togglePin(_ sender: NSMenuItem) {
+        guard let bundle = sender.representedObject as? String else { return }
+        if pinned.contains(bundle) { pinned.removeAll { $0 == bundle } } else { pinned.append(bundle) }
+        refresh()
+    }
+    func reorderPin(_ bundle: String, targetX: CGFloat) {
+        var items = pinned
+        guard let oldIndex = items.firstIndex(of: bundle) else { return }
+        items.remove(at: oldIndex)
+        let target = min(max(Int((targetX / 62).rounded(.down)), 0), items.count)
+        items.insert(bundle, at: target)
+        pinned = items; refresh()
+    }
+    func newFinderWindow(on screen: NSScreen) {
+        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
+              let display = displayID(screen) else { return }
+        let root = AXUIElementCreateApplication(finder.processIdentifier)
+        let previous: [AXUIElement] = attribute(root, kAXWindowsAttribute as CFString) ?? []
+        var error: NSDictionary?
+        NSAppleScript(source: "tell application \"Finder\"\nactivate\nmake new Finder window\nend tell")?.executeAndReturnError(&error)
+        if let error = error {
+            let alert = NSAlert(); alert.messageText = "Couldn’t open a Finder window"
+            alert.informativeText = "Allow Windows QoL to control Finder in System Settings → Privacy & Security → Automation.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
+            alert.runModal(); return
+        }
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            attempts += 1
+            let current: [AXUIElement] = attribute(root, kAXWindowsAttribute as CFString) ?? []
+            if let created = current.first(where: { newWindow in !previous.contains(where: { CFEqual($0, newWindow) }) }) {
+                let bounds = CGDisplayBounds(display)
+                let size = windowRect(created)?.size ?? CGSize(width: 700, height: 500)
+                var point = CGPoint(x: bounds.minX + max(0, (bounds.width - size.width) / 2), y: bounds.minY + max(30, (bounds.height - size.height) / 2))
+                if let value = AXValueCreate(.cgPoint, &point) { AXUIElementSetAttributeValue(created, kAXPositionAttribute as CFString, value) }
+                AXUIElementPerformAction(created, kAXRaiseAction as CFString)
+                timer.invalidate()
+            } else if attempts >= 20 { timer.invalidate() }
+        }
     }
     @objc func openTrash() {
         NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".Trash", isDirectory: true))
@@ -501,7 +579,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if matches.count > 1 {
             showWindows(matches, anchoredTo: sender)
         } else if let record = matches.first { closeHover(); toggle(record) }
+        else if bundle == "com.apple.finder" { closeHover(); newFinderWindow(on: screen) }
+        else if records.contains(where: { $0.app.bundleIdentifier == bundle }) {
+            // Let the user explicitly choose a remote window instead of silently switching displays.
+            showWindows(records.filter { $0.app.bundleIdentifier == bundle }, anchoredTo: sender)
+        }
         else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) {
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first, app.isHidden {
+                let root = AXUIElementCreateApplication(app.processIdentifier)
+                let hiddenWindows: [AXUIElement] = attribute(root, kAXWindowsAttribute as CFString) ?? []
+                if !hiddenWindows.isEmpty {
+                    let alert = NSAlert()
+                    alert.messageText = "\(app.localizedName ?? "App") is hidden"
+                    alert.informativeText = "Its existing windows may be on another display. Show the app?"
+                    alert.addButton(withTitle: "Show App"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                }
+            }
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
     }
