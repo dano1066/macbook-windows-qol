@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import ScreenCaptureKit
+import ServiceManagement
 
 let taskbarHeight: CGFloat = 72
 
@@ -238,6 +239,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var permissionsWindow: NSWindow?
     var accessibilityStatus: NSTextField?
     var screenCaptureStatus: NSTextField?
+    var loginStatusLabel: NSTextField?
+    var loginButton: NSButton?
     let shortcuts = WindowsShortcuts()
     let shortcutsKey = "fnShortcutsEnabled"
     var shortcutsEnabled: Bool {
@@ -357,8 +360,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 292), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 382), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Windows QoL Settings"; window.isReleasedWhenClosed = false
+        let general = NSTextField(labelWithString: "Startup")
+        general.font = .boldSystemFont(ofSize: 19); general.frame = NSRect(x: 24, y: 338, width: 490, height: 26)
+        let loginStatus = NSTextField(labelWithString: ""); loginStatus.frame = NSRect(x: 24, y: 307, width: 350, height: 20)
+        let login = NSButton(title: "Enable", target: self, action: #selector(toggleLaunchAtLogin))
+        login.bezelStyle = .rounded; login.frame = NSRect(x: 365, y: 302, width: 150, height: 30)
         let title = NSTextField(labelWithString: "Permissions")
         title.font = .boldSystemFont(ofSize: 19); title.frame = NSRect(x: 24, y: 248, width: 490, height: 26)
         let accessibility = NSTextField(wrappingLabelWithString: "Accessibility — needed for window controls and Fn shortcuts.")
@@ -373,13 +381,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         captureButton.bezelStyle = .rounded; captureButton.frame = NSRect(x: 390, y: 67, width: 125, height: 30)
         let note = NSTextField(labelWithString: "macOS manages permissions; changes may require reopening the app.")
         note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 11); note.frame = NSRect(x: 24, y: 22, width: 495, height: 18)
-        for view in [title, accessibility, axStatus, axButton, screen, captureStatus, captureButton, note] as [NSView] { window.contentView?.addSubview(view) }
+        for view in [general, loginStatus, login, title, accessibility, axStatus, axButton, screen, captureStatus, captureButton, note] as [NSView] { window.contentView?.addSubview(view) }
+        loginStatusLabel = loginStatus; loginButton = login
         accessibilityStatus = axStatus; screenCaptureStatus = captureStatus; permissionsWindow = window
         updatePermissionStatuses(); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func updatePermissionStatuses() {
         accessibilityStatus?.stringValue = AXIsProcessTrusted() ? "Status: Enabled" : "Status: Not enabled"
         screenCaptureStatus?.stringValue = CGPreflightScreenCaptureAccess() ? "Status: Enabled" : "Status: Not enabled"
+        if #available(macOS 13.0, *) {
+            switch SMAppService.mainApp.status {
+            case .enabled: loginStatusLabel?.stringValue = "Open at login: On"; loginButton?.title = "Disable"
+            case .notRegistered: loginStatusLabel?.stringValue = "Open at login: Off"; loginButton?.title = "Enable"
+            case .requiresApproval: loginStatusLabel?.stringValue = "Open at login: Approval needed"; loginButton?.title = "Open Settings…"
+            case .notFound: loginStatusLabel?.stringValue = "Open at login: App not found"; loginButton?.title = "Enable"
+            @unknown default: loginStatusLabel?.stringValue = "Open at login: Unknown"; loginButton?.title = "Open Settings…"
+            }
+        } else {
+            loginStatusLabel?.stringValue = "Open at login: Requires macOS 13 or later"
+            loginButton?.isEnabled = false
+        }
+    }
+    @objc func toggleLaunchAtLogin() {
+        guard #available(macOS 13.0, *) else { return }
+        let service = SMAppService.mainApp
+        do {
+            switch service.status {
+            case .enabled: try service.unregister()
+            case .notRegistered, .notFound: try service.register()
+            case .requiresApproval: SMAppService.openSystemSettingsLoginItems(); return
+            @unknown default: SMAppService.openSystemSettingsLoginItems(); return
+            }
+            if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        } catch {
+            let alert = NSAlert(); alert.messageText = "Couldn’t change startup setting"
+            alert.informativeText = "\(error.localizedDescription)\n\nYou can also add or remove Windows QoL in System Settings → General → Login Items & Extensions."
+            alert.runModal()
+        }
+        updatePermissionStatuses()
     }
     @objc func requestAccessibilityFromSettings() {
         requestAccess()
