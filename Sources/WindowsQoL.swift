@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import ScreenCaptureKit
 
 // A small, extensible host for desktop features. The taskbar is the first feature.
 struct WindowRecord {
@@ -58,7 +59,7 @@ func windows(previous: [WindowRecord]) -> [WindowRecord] {
     return result
 }
 
-final class HoverButton: NSButton {
+class HoverButton: NSButton {
     var onHover: ((HoverButton) -> Void)?
     override func updateTrackingAreas() {
         for area in trackingAreas { removeTrackingArea(area) }
@@ -66,6 +67,22 @@ final class HoverButton: NSButton {
         super.updateTrackingAreas()
     }
     override func mouseEntered(with event: NSEvent) { onHover?(self) }
+}
+
+final class AppIconButton: HoverButton {
+    var appIcon: NSImage?
+    var windowCount = 0
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let icon = appIcon else { return }
+        if windowCount > 1 {
+            icon.draw(in: NSRect(x: 13, y: 10, width: 27, height: 27), from: .zero, operation: .sourceOver, fraction: 0.50)
+            icon.draw(in: NSRect(x: 9, y: 7, width: 29, height: 29), from: .zero, operation: .sourceOver, fraction: 0.75)
+            icon.draw(in: NSRect(x: 4, y: 3, width: 32, height: 32))
+        } else {
+            icon.draw(in: NSRect(x: 3, y: 3, width: 38, height: 38))
+        }
+    }
 }
 
 // Translate selected Fn combinations; all other events pass through.
@@ -190,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hoverAnchor: NSRect = .zero
     var hoverPending: DispatchWorkItem?
     var hoverMonitor: Timer?
+    var hoverLastInside = Date()
     var permissionsWindow: NSWindow?
     var accessibilityStatus: NSTextField?
     var screenCaptureStatus: NSTextField?
@@ -398,10 +416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: 52), display: false)
             let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: 52))
             let utilityIDs = ["com.apple.Terminal", "com.apple.systempreferences"]
-            var ids: [String] = id == primary ? pinned.filter { !utilityIDs.contains($0) } : []
+            var ids: [String] = id == primary ? pinned : []
             let local = records.filter { $0.displayID == id }
             for record in local {
-                if let bundle = record.app.bundleIdentifier, !utilityIDs.contains(bundle), !ids.contains(bundle) { ids.append(bundle) }
+                if let bundle = record.app.bundleIdentifier, !ids.contains(bundle) { ids.append(bundle) }
             }
             var x: CGFloat = 8
             for bundle in ids {
@@ -409,20 +427,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let app = local.first { $0.app.bundleIdentifier == bundle }?.app
                 let url = app?.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
                 guard let appURL = url else { continue }
-                let button = HoverButton(frame: NSRect(x: x, y: 5, width: 44, height: 42))
+                let button = AppIconButton(frame: NSRect(x: x, y: 5, width: 44, height: 42))
                 button.bezelStyle = .regularSquare; button.isBordered = false
-                button.image = NSWorkspace.shared.icon(forFile: appURL.path); button.imagePosition = .imageOnly
-                button.imageScaling = .scaleProportionallyDown
+                button.appIcon = NSWorkspace.shared.icon(forFile: appURL.path)
+                button.windowCount = local.filter { $0.app.bundleIdentifier == bundle }.count
                 button.toolTip = app?.localizedName ?? FileManager.default.displayName(atPath: appURL.path)
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
                 button.target = self; button.action = #selector(appClicked(_:))
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
                 bar.addSubview(button)
-                if app != nil {
-                    let dot = NSView(frame: NSRect(x: x + 16, y: 2, width: 12, height: 3))
-                    dot.wantsLayer = true; dot.layer?.backgroundColor = NSColor.systemBlue.cgColor; dot.layer?.cornerRadius = 1.5
-                    bar.addSubview(dot)
-                }
                 x += 48
             }
             if !trusted {
@@ -432,22 +445,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 bar.addSubview(label)
             }
             for (index, bundle) in utilityIDs.enumerated() {
-                guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { continue }
+                guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil else { continue }
                 let utilityX = max(0, screen.frame.width - 196 + CGFloat(index) * 48)
-                let button = HoverButton(frame: NSRect(x: utilityX, y: 5, width: 44, height: 42))
+                let button = NSButton(frame: NSRect(x: utilityX, y: 5, width: 44, height: 42))
                 button.bezelStyle = .regularSquare; button.isBordered = false
-                button.image = NSWorkspace.shared.icon(forFile: url.path); button.imagePosition = .imageOnly
-                button.imageScaling = .scaleProportionallyDown
                 button.toolTip = bundle == "com.apple.Terminal" ? "Terminal" : "System Settings"
+                button.image = NSImage(systemSymbolName: bundle == "com.apple.Terminal" ? "terminal" : "gearshape", accessibilityDescription: button.toolTip)
+                button.imagePosition = .imageOnly; button.imageScaling = .scaleProportionallyDown
+                button.contentTintColor = .white
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
-                button.target = self; button.action = #selector(appClicked(_:))
-                button.onHover = { [weak self] button in self?.scheduleHover(button) }
+                button.target = self; button.action = #selector(launchUtility(_:))
                 bar.addSubview(button)
-                if local.contains(where: { $0.app.bundleIdentifier == bundle }) {
-                    let dot = NSView(frame: NSRect(x: utilityX + 16, y: 2, width: 12, height: 3))
-                    dot.wantsLayer = true; dot.layer?.backgroundColor = NSColor.systemBlue.cgColor; dot.layer?.cornerRadius = 1.5
-                    bar.addSubview(dot)
-                }
             }
             let trash = NSButton(frame: NSRect(x: max(0, screen.frame.width - 100), y: 5, width: 44, height: 42))
             trash.bezelStyle = .regularSquare; trash.isBordered = false
@@ -465,6 +473,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bar.addSubview(dockButton)
             panel.contentView = bar; panel.orderFrontRegardless()
         }
+    }
+    @objc func launchUtility(_ sender: NSButton) {
+        guard let bundle = sender.identifier?.rawValue,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
     @objc func openTrash() {
         NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".Trash", isDirectory: true))
@@ -486,8 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let screen = panel.screen, let id = displayID(screen) else { return }
         let matches = records.filter { $0.displayID == id && $0.app.bundleIdentifier == bundle }
         if matches.count > 1 {
-            if let active = matches.first(where: isActive) { closeHover(); toggle(active) }
-            else { showWindows(matches, anchoredTo: sender) }
+            showWindows(matches, anchoredTo: sender)
         } else if let record = matches.first { closeHover(); toggle(record) }
         else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
@@ -515,34 +527,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showWindows(_ matches: [WindowRecord], anchoredTo button: NSButton) {
         guard let window = button.window, let screen = window.screen else { return }
         closeHover()
-        hoverAnchor = window.convertToScreen(button.convert(button.bounds, to: nil)).insetBy(dx: -5, dy: -8)
-        let width: CGFloat = 280, rowHeight: CGFloat = 36
-        let height = min(CGFloat(matches.count) * rowHeight + 12, max(80, screen.visibleFrame.height - 70))
-        let x = min(max(screen.frame.minX, hoverAnchor.midX - width / 2), screen.frame.maxX - width)
+        hoverAnchor = window.convertToScreen(button.convert(button.bounds, to: nil)).insetBy(dx: -18, dy: -14)
+        let cardWidth: CGFloat = 176, cardHeight: CGFloat = 148, padding: CGFloat = 12, gap: CGFloat = 8
+        let contentWidth = CGFloat(matches.count) * (cardWidth + gap) - gap + 2 * padding
+        let width = min(contentWidth, max(1, screen.visibleFrame.width - 24))
+        let height = cardHeight + 2 * padding
+        let x = min(max(screen.visibleFrame.minX + 12, hoverAnchor.midX - width / 2), screen.visibleFrame.maxX - width - 12)
         let panel = NSPanel(contentRect: NSRect(x: x, y: window.frame.maxY, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false; panel.backgroundColor = NSColor(calibratedWhite: 0.16, alpha: 0.98)
         panel.level = .floating; panel.hasShadow = true; panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        let scroll = NSScrollView(frame: NSRect(x: 4, y: 4, width: width - 8, height: height - 8))
-        scroll.hasVerticalScroller = CGFloat(matches.count) * rowHeight > height - 8
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        scroll.hasHorizontalScroller = contentWidth > width
+        scroll.hasVerticalScroller = false
         scroll.drawsBackground = false
-        let listHeight = max(height - 8, CGFloat(matches.count) * rowHeight)
-        let list = NSView(frame: NSRect(x: 0, y: 0, width: width - 8, height: listHeight))
+        let list = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: height))
+        var cards: [WindowButton] = []
         for (index, record) in matches.enumerated() {
-            let row = WindowButton(frame: NSRect(x: 4, y: listHeight - CGFloat(index + 1) * rowHeight, width: width - 16, height: rowHeight))
+            let row = WindowButton(frame: NSRect(x: padding + CGFloat(index) * (cardWidth + gap), y: padding, width: cardWidth, height: cardHeight))
             row.title = (record.minimized ? "◌  " : "") + (record.title.isEmpty ? (record.app.localizedName ?? "Window") : record.title)
             row.record = record; row.target = self; row.action = #selector(windowSelected(_:))
-            row.bezelStyle = .regularSquare; row.isBordered = false; row.alignment = .left
+            row.bezelStyle = .regularSquare; row.isBordered = false; row.alignment = .center
             row.contentTintColor = .white; row.font = .systemFont(ofSize: 13)
-            row.lineBreakMode = .byTruncatingTail
+            row.lineBreakMode = .byTruncatingTail; row.imagePosition = .imageAbove
+            row.imageScaling = .scaleProportionallyDown; row.image = record.app.icon
+            row.wantsLayer = true; row.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            row.layer?.cornerRadius = 8; row.toolTip = row.title
             list.addSubview(row)
+            cards.append(row)
         }
         scroll.documentView = list; panel.contentView = scroll
         hoverPanel = panel; panel.orderFrontRegardless()
+        hoverLastInside = Date()
+        loadWindowPreviews(matches, cards: cards, panel: panel)
         hoverMonitor = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self = self, let panel = self.hoverPanel else { return }
             let mouse = NSEvent.mouseLocation
-            if !self.hoverAnchor.contains(mouse) && !panel.frame.insetBy(dx: -8, dy: -8).contains(mouse) { self.closeHover() }
+            let safeArea = panel.frame.union(self.hoverAnchor).insetBy(dx: -28, dy: -20)
+            if safeArea.contains(mouse) { self.hoverLastInside = Date() }
+            else if Date().timeIntervalSince(self.hoverLastInside) > 0.8 { self.closeHover() }
+        }
+    }
+    func loadWindowPreviews(_ records: [WindowRecord], cards: [WindowButton], panel: NSPanel) {
+        guard #available(macOS 14.0, *), CGPreflightScreenCaptureAccess() else { return }
+        // A matching process and window geometry are required; avoid showing the wrong window.
+        let frames = records.map { windowRect($0.element) }
+        Task { @MainActor [weak self, weak panel] in
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) else { return }
+            for (index, record) in records.enumerated() where !record.minimized {
+                guard let expected = frames[index], let panel = panel, self?.hoverPanel === panel else { continue }
+                let candidates = content.windows.filter { candidate in
+                    let rect = candidate.frame
+                    return candidate.owningApplication?.processID == record.app.processIdentifier && candidate.isOnScreen &&
+                        abs(rect.minX - expected.minX) + abs(rect.minY - expected.minY) + abs(rect.width - expected.width) + abs(rect.height - expected.height) < 12
+                }
+                let titled = candidates.filter { $0.title == record.title }
+                let matches = titled.isEmpty ? candidates : titled
+                guard matches.count == 1, let window = matches.first else { continue }
+                let configuration = SCStreamConfiguration()
+                configuration.width = 320; configuration.height = max(1, Int(320 * window.frame.height / max(1, window.frame.width)))
+                configuration.showsCursor = false
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration), self?.hoverPanel === panel else { continue }
+                cards[index].image = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+            }
         }
     }
     @objc func windowSelected(_ sender: WindowButton) {
