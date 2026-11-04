@@ -19,6 +19,7 @@
 - macOS has a single native Dock, and there is no reliable public API here for assigning it to the monitor whose taskbar button was clicked. Do not promise per-monitor native Dock control.
 - The rightmost button toggles the global Dock auto-hide setting using System Events; the former implementation restarted Dock on every click and caused visible flicker. macOS may ask for Automation permission.
 - To suppress accidental edge reveals, the app temporarily sets the undocumented global `autohide-delay` to 1,000 seconds. On a normal quit, it restores the saved previous delay and makes the native Dock visible, restarting Dock once to apply the change. Preserve the backup and do not overwrite later user changes to the delay. A crash or force quit cannot run normal shutdown cleanup; reopen and quit normally to recover. For immediate recovery, `defaults write com.apple.dock autohide -bool false && killall Dock` makes the Dock visible.
+- The app hides the Dock on startup. The ▣ menu's Reload option performs a normal quit and launches the app again; the Dock can briefly reappear and restart during this process. Dan confirmed both behaviors work.
 - Dan confirmed the Dock toggle worked and the old process-restart implementation flickered. The newer System Events toggle and shutdown cleanup require interactive verification when changed; do not describe compilation alone as proof.
 
 ## Finder and taskbar behavior

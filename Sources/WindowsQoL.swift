@@ -146,10 +146,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defaults.set(["exists": status == 0, "value": value], forKey: dockBackupKey)
         }
         let (_, current) = runCommand("/usr/bin/defaults", ["read", "com.apple.dock", "autohide-delay"])
+        var restartDock = false
         if Double(current) != 1000 {
             let (status, _) = runCommand("/usr/bin/defaults", ["write", "com.apple.dock", "autohide-delay", "-float", "1000"])
-            if status == 0 { runCommand("/usr/bin/killall", ["Dock"]) }
+            restartDock = status == 0
         }
+        let (hideStatus, hideValue) = runCommand("/usr/bin/defaults", ["read", "com.apple.dock", "autohide"])
+        if hideStatus != 0 || (hideValue != "1" && hideValue.lowercased() != "true") {
+            let (status, _) = runCommand("/usr/bin/defaults", ["write", "com.apple.dock", "autohide", "-bool", "true"])
+            restartDock = restartDock || status == 0
+        }
+        if restartDock { runCommand("/usr/bin/killall", ["Dock"]) }
     }
     func applicationWillTerminate(_ notification: Notification) {
         let defaults = UserDefaults.standard
@@ -177,8 +184,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let reset = NSMenuItem(title: "Reset pinned apps", action: #selector(resetPins), keyEquivalent: "")
         reset.target = self; menu.addItem(reset)
         menu.addItem(.separator())
+        let reload = NSMenuItem(title: "Reload Windows QoL", action: #selector(reloadApp), keyEquivalent: "")
+        reload.target = self; menu.addItem(reload)
         let quit = NSMenuItem(title: "Quit Windows QoL", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit); status.menu = menu
+    }
+    @objc func reloadApp() {
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Arguments are passed separately so spaces and shell characters in the path are safe.
+        helper.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"$2\"", "windows-qol-reload", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundleURL.path]
+        do {
+            try helper.run()
+            NSApp.terminate(nil)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t reload Windows QoL"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
     }
     @objc func requestAccess() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
