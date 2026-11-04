@@ -13,7 +13,7 @@ A native Mac utility for bringing familiar Windows-style desktop features to mac
 
 While running, the app sets the Dock's edge reveal delay to 1,000 seconds, so accidental edge reveals are unlikely. On a normal quit, it restores the previous delay and shows the Dock; the Dock briefly restarts. If the app crashes or is force-quit, that cleanup cannot run; relaunch and quit normally to restore it. If needed, `defaults write com.apple.dock autohide -bool false && killall Dock` makes the Dock visible immediately.
 
-The bundled Finder extension adds **Open Terminal Here** to the context menu when right-clicking empty space in a folder. After opening the app, enable the Finder extension under System Settings → General → Login Items & Extensions → Finder if needed. It may not appear in every location, such as virtual or cloud-provider folders.
+The bundled Finder extension adds **Open Terminal Here** to the context menu when right-clicking empty space in a folder or a single folder itself. After opening the app, enable the Finder extension under System Settings → General → Login Items & Extensions → Finder if needed. It may not appear in every location, such as virtual or cloud-provider folders. Finder may need to be restarted after updating the extension.
 
 ## Build and run
 

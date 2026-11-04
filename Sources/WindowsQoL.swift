@@ -114,6 +114,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
         timer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
     }
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard url.scheme == "windowsqol-terminal", url.host == "open",
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let path = components.queryItems?.first(where: { $0.name == "folder" })?.value,
+                  path.hasPrefix("/"),
+                  let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else { continue }
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+            NSWorkspace.shared.open([URL(fileURLWithPath: path, isDirectory: true)], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                if let error = error { NSLog("Could not open Terminal: %@", error.localizedDescription) }
+            }
+        }
+    }
     @discardableResult
     func runCommand(_ path: String, _ arguments: [String]) -> (Int32, String) {
         let task = Process(); task.executableURL = URL(fileURLWithPath: path); task.arguments = arguments

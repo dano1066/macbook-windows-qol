@@ -35,6 +35,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>LSUIElement</key><true/>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>windowsqol-terminal</string></array></dict></array>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Windows QoL controls System Events to change Dock auto-hide without restarting the Dock.</string>
