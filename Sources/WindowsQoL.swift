@@ -34,6 +34,12 @@ func displayID(_ screen: NSScreen) -> CGDirectDisplayID? {
     (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
 }
 
+func displayPinKey(_ id: CGDirectDisplayID) -> String {
+    guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
+          let value = CFUUIDCreateString(kCFAllocatorDefault, uuid) else { return "display-\(id)" }
+    return value as String
+}
+
 func windows(previous: [WindowRecord]) -> [WindowRecord] {
     let screens = NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
         guard let id = displayID(screen) else { return nil }
@@ -384,10 +390,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         set { UserDefaults.standard.set(newValue, forKey: shortcutsKey) }
     }
     let pinnedKey = "pinnedApplications"
+    let displayPinsKey = "pinnedApplicationsByDisplay"
     let dockBackupKey = "dockDelayBackup"
     var pinned: [String] {
         get { UserDefaults.standard.stringArray(forKey: pinnedKey) ?? ["com.apple.finder", "com.apple.Safari"] }
         set { UserDefaults.standard.set(newValue, forKey: pinnedKey); signature = "" }
+    }
+    var displayPins: [String: [String]] {
+        get { UserDefaults.standard.dictionary(forKey: displayPinsKey) as? [String: [String]] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: displayPinsKey); signature = "" }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -563,7 +574,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text("Last used app: \(name)", y: 250, height: 22)
             let pin = button("Pin last used app", y: 204, action: #selector(pinFrontmost), width: 175)
             pin.isEnabled = lastExternalApplication?.bundleIdentifier != nil
-            text("Restore the default pinned apps (Finder and Safari).", y: 146)
+            text("Restore the default pinned apps and clear pins on other displays.", y: 146)
             _ = button("Reset pinned apps", y: 101, action: #selector(resetPins), width: 175)
         case 2:
             heading("Shortcuts")
@@ -662,7 +673,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !pinned.contains(id) { pinned.append(id) }
         refresh()
     }
-    @objc func resetPins() { UserDefaults.standard.removeObject(forKey: pinnedKey); signature = ""; refresh() }
+    @objc func resetPins() {
+        UserDefaults.standard.removeObject(forKey: pinnedKey)
+        UserDefaults.standard.removeObject(forKey: displayPinsKey)
+        signature = ""; refresh()
+    }
     @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; refresh() }
     @objc func refresh() {
         if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
@@ -673,7 +688,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
         if trusted { keepMaximizedWindowsAboveTaskbars() }
-        let state = "\(trusted)|\(pinned.joined(separator: ","))|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized):\(isActive($0))" }.sorted().joined(separator: "|")
+        let displayPinState = displayPins.keys.sorted().map { "\($0):\((displayPins[$0] ?? []).joined(separator: ","))" }.joined(separator: "|")
+        let state = "\(trusted)|\(pinned.joined(separator: ","))|\(displayPinState)|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized):\(isActive($0))" }.sorted().joined(separator: "|")
         guard state != signature else { return }
         signature = state
         closeHover()
@@ -686,7 +702,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: taskbarHeight), display: false)
             let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: taskbarHeight))
             let utilityIDs = ["com.apple.Terminal", "com.apple.systempreferences"]
-            var ids: [String] = id == primary ? pinned : []
+            let isPrimary = id == primary
+            let key = displayPinKey(id)
+            let localPins = isPrimary ? pinned : (displayPins[key] ?? [])
+            var ids: [String] = localPins
             let local = records.filter { $0.displayID == id }
             for record in local {
                 if let bundle = record.app.bundleIdentifier, !ids.contains(bundle) { ids.append(bundle) }
@@ -708,10 +727,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
                 button.target = self; button.action = #selector(appClicked(_:))
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
-                button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle) ?? NSMenu() }
-                if id == primary && pinned.contains(bundle) {
+                button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle, displayKey: key, isPrimary: isPrimary) ?? NSMenu() }
+                if localPins.contains(bundle) {
                     let leftEdge = screen.frame.minX + 8
-                    button.onReorder = { [weak self] screenX in self?.reorderPin(bundle, targetX: screenX - leftEdge) }
+                    button.onReorder = { [weak self] screenX in self?.reorderPin(bundle, targetX: screenX - leftEdge, displayKey: key, isPrimary: isPrimary) }
                 }
                 bar.addSubview(button)
                 x += 62
@@ -780,24 +799,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
-    func appContextMenu(bundle: String) -> NSMenu {
+    func appContextMenu(bundle: String, displayKey: String, isPrimary: Bool) -> NSMenu {
         let menu = NSMenu()
-        let item = NSMenuItem(title: pinned.contains(bundle) ? "Unpin from taskbar" : "Pin to primary taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
-        item.target = self; item.representedObject = bundle; menu.addItem(item)
+        let primaryItem = NSMenuItem(title: pinned.contains(bundle) ? "Unpin from primary taskbar" : "Pin to primary taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
+        primaryItem.target = self; primaryItem.representedObject = ["bundle": bundle, "scope": "primary"]; menu.addItem(primaryItem)
+        if !isPrimary {
+            let isPinnedHere = (displayPins[displayKey] ?? []).contains(bundle)
+            let localItem = NSMenuItem(title: isPinnedHere ? "Unpin from this taskbar" : "Pin to this taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
+            localItem.target = self; localItem.representedObject = ["bundle": bundle, "scope": displayKey]; menu.addItem(localItem)
+        }
         return menu
     }
     @objc func togglePin(_ sender: NSMenuItem) {
-        guard let bundle = sender.representedObject as? String else { return }
-        if pinned.contains(bundle) { pinned.removeAll { $0 == bundle } } else { pinned.append(bundle) }
+        guard let context = sender.representedObject as? [String: String], let bundle = context["bundle"], let scope = context["scope"] else { return }
+        if scope == "primary" {
+            if pinned.contains(bundle) { pinned.removeAll { $0 == bundle } } else { pinned.append(bundle) }
+        } else {
+            var all = displayPins; var pins = all[scope] ?? []
+            if pins.contains(bundle) { pins.removeAll { $0 == bundle } } else { pins.append(bundle) }
+            if pins.isEmpty { all.removeValue(forKey: scope) } else { all[scope] = pins }
+            displayPins = all
+        }
         refresh()
     }
-    func reorderPin(_ bundle: String, targetX: CGFloat) {
-        var items = pinned
+    func reorderPin(_ bundle: String, targetX: CGFloat, displayKey: String, isPrimary: Bool) {
+        var items = isPrimary ? pinned : (displayPins[displayKey] ?? [])
         guard let oldIndex = items.firstIndex(of: bundle) else { return }
         items.remove(at: oldIndex)
         let target = min(max(Int((targetX / 62).rounded(.down)), 0), items.count)
         items.insert(bundle, at: target)
-        pinned = items; refresh()
+        if isPrimary { pinned = items } else { var all = displayPins; all[displayKey] = items; displayPins = all }
+        refresh()
     }
     func newFinderWindow(on screen: NSScreen) {
         guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
