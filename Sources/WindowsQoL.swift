@@ -12,6 +12,8 @@ struct WindowRecord {
     let title: String
     let displayID: CGDirectDisplayID
     let minimized: Bool
+    let frame: CGRect?
+    let subrole: String
 }
 
 func attribute<T>(_ element: AXUIElement, _ name: CFString, as: T.Type = T.self) -> T? {
@@ -62,7 +64,7 @@ func windows(previous: [WindowRecord]) -> [WindowRecord] {
             guard let chosen = (minimized ? oldDisplay : nil) ?? currentDisplay,
                   screens.contains(where: { $0.0 == chosen }) else { continue }
             let title: String = attribute(element, kAXTitleAttribute as CFString) ?? app.localizedName ?? "Window"
-            result.append(WindowRecord(app: app, element: element, title: title, displayID: chosen, minimized: minimized))
+            result.append(WindowRecord(app: app, element: element, title: title, displayID: chosen, minimized: minimized, frame: rect, subrole: subrole))
         }
     }
     return result
@@ -70,19 +72,23 @@ func windows(previous: [WindowRecord]) -> [WindowRecord] {
 
 // Quartz supplies windows in front-to-back order; match them to tracked AX windows
 // by process and geometry, avoiding guesses when the match is ambiguous.
-func frontmostWindowsByDisplay(_ records: [WindowRecord]) -> [CGDirectDisplayID: AXUIElement] {
+func frontmostWindowsByDisplay(_ records: [WindowRecord], useCachedFrames: Bool = false) -> [CGDirectDisplayID: AXUIElement] {
     guard let listed = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [:] }
+    let candidates = Dictionary(grouping: records.filter { !$0.minimized }, by: { $0.app.processIdentifier })
+        .mapValues { windows in windows.compactMap { record -> (WindowRecord, CGRect)? in
+            guard let frame = useCachedFrames ? record.frame : windowRect(record.element) else { return nil }
+            return (record, frame)
+        } }
     var result: [CGDirectDisplayID: AXUIElement] = [:]
     for info in listed {
         guard (info[kCGWindowLayer as String] as? Int) == 0,
               let pid = info[kCGWindowOwnerPID as String] as? Int,
               let bounds = info[kCGWindowBounds as String] as? [String: Any],
               let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { continue }
-        let matches = records.filter { record in
-            guard !record.minimized, record.app.processIdentifier == pid, let frame = windowRect(record.element) else { return false }
+        let matches = (candidates[pid_t(pid)] ?? []).filter { _, frame in
             return abs(frame.minX - rect.minX) + abs(frame.minY - rect.minY) + abs(frame.width - rect.width) + abs(frame.height - rect.height) < 12
         }
-        guard matches.count == 1, let record = matches.first, result[record.displayID] == nil else { continue }
+        guard matches.count == 1, let record = matches.first?.0, result[record.displayID] == nil else { continue }
         result[record.displayID] = record.element
     }
     return result
@@ -571,6 +577,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var panels: [CGDirectDisplayID: TaskbarPanel] = [:]
     var timer: Timer?
     var records: [WindowRecord] = []
+    // Retain only recent attempts for still-open windows. An unchanged frame
+    // after a resize can mean the application ignored the request.
+    var clearanceAttempts: [(element: AXUIElement, frame: CGRect, time: Date)] = []
     var signature = ""
     var hoverPanel: NSPanel?
     var hoverAnchor: NSRect = .zero
@@ -907,7 +916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
         if trusted { keepMaximizedWindowsAboveTaskbars() }
-        let frontmost = frontmostWindowsByDisplay(records)
+        let frontmost = frontmostWindowsByDisplay(records, useCachedFrames: true)
         let displayPinState = displayPins.keys.sorted().map { "\($0):\((displayPins[$0] ?? []).joined(separator: ","))" }.joined(separator: "|")
         let state = "\(trusted)|\(pinned.joined(separator: ","))|\(displayPinState)|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { record in "\(record.app.processIdentifier):\(record.displayID):\(record.title):\(record.minimized):\(frontmost[record.displayID].map { CFEqual($0, record.element) } ?? false)" }.sorted().joined(separator: "|")
         guard state != signature else { return }
@@ -1032,12 +1041,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // macOS does not reserve desktop space for third-party taskbar panels.
         // Adjust only windows that span nearly the full usable display height,
         // after the user has finished dragging or resizing.
+        clearanceAttempts.removeAll { attempt in
+            !records.contains { CFEqual($0.element, attempt.element) && $0.frame == attempt.frame }
+        }
         guard NSEvent.pressedMouseButtons == 0 else { return }
         for record in records where !record.minimized {
             guard let screen = NSScreen.screens.first(where: { displayID($0) == record.displayID }),
-                  let rect = windowRect(record.element),
-                  (attribute(record.element, "AXFullScreen" as CFString, as: Bool.self) ?? false) == false,
-                  (attribute(record.element, kAXSubroleAttribute as CFString, as: String.self) ?? "") == kAXStandardWindowSubrole as String else { continue }
+                  let rect = record.frame,
+                  record.subrole == kAXStandardWindowSubrole as String,
+                  !clearanceAttempts.contains(where: { CFEqual($0.element, record.element) && Date().timeIntervalSince($0.time) < 30 }) else { continue }
             let display = CGDisplayBounds(record.displayID)
             let topInset = screen.frame.maxY - screen.visibleFrame.maxY
             let usableTop = display.minY + topInset
@@ -1045,10 +1057,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard abs(rect.minY - usableTop) <= 24,
                   abs(rect.maxY - display.maxY) <= 24,
                   rect.height >= display.height * 0.70,
-                  rect.maxY > taskbarTop + 1 else { continue }
+                  rect.maxY > taskbarTop + 1,
+                  (attribute(record.element, "AXFullScreen" as CFString, as: Bool.self) ?? false) == false else { continue }
             var size = CGSize(width: rect.width, height: taskbarTop - rect.minY)
             guard size.height > 100, let value = AXValueCreate(.cgSize, &size) else { continue }
             AXUIElementSetAttributeValue(record.element, kAXSizeAttribute as CFString, value)
+            clearanceAttempts.removeAll { CFEqual($0.element, record.element) }
+            clearanceAttempts.append((record.element, rect, Date()))
         }
     }
     @objc func openSpotlight() {
