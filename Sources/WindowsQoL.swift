@@ -106,6 +106,7 @@ final class AppIconButton: TaskbarClickButton {
     var windowCount = 0
     var hasVisibleWindow = false
     var isFocused = false
+    var remoteDirections: Set<Int> = []
     var contextMenu: (() -> NSMenu)?
     var onReorder: ((CGFloat) -> Void)?
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
@@ -141,6 +142,18 @@ final class AppIconButton: TaskbarClickButton {
             (isFocused ? NSColor.systemCyan : (hasVisibleWindow ? NSColor.systemBlue : NSColor.systemBlue.withAlphaComponent(0.45))).setFill()
             let lineHeight: CGFloat = hasVisibleWindow ? 5 : 3
             NSBezierPath(roundedRect: NSRect(x: 10, y: bounds.height - lineHeight - 2, width: 38, height: lineHeight), xRadius: lineHeight / 2, yRadius: lineHeight / 2).fill()
+        } else if !remoteDirections.isEmpty {
+            let left = remoteDirections.contains(-1)
+            let right = remoteDirections.contains(1)
+            let center = remoteDirections.contains(0) || (left && right)
+            let clear = NSColor.systemBlue.withAlphaComponent(0.0)
+            let blue = NSColor.systemBlue
+            let colors = center ? [clear, blue, clear] : (left ? [blue, clear] : [clear, blue])
+            let rect = NSRect(x: 10, y: bounds.height - 7, width: 38, height: 5)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(roundedRect: rect, xRadius: 2.5, yRadius: 2.5).addClip()
+            NSGradient(colors: colors)?.draw(in: rect, angle: 0)
+            NSGraphicsContext.restoreGraphicsState()
         }
     }
 }
@@ -743,6 +756,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 button.appIcon = NSWorkspace.shared.icon(forFile: appURL.path)
                 let localWindows = local.filter { $0.app.bundleIdentifier == bundle }
+                if localPins.contains(bundle) && localWindows.isEmpty {
+                    let currentBounds = CGDisplayBounds(id)
+                    for remote in records where remote.app.bundleIdentifier == bundle && remote.displayID != id {
+                        let other = CGDisplayBounds(remote.displayID)
+                        if other.maxX <= currentBounds.minX { button.remoteDirections.insert(-1) }
+                        else if other.minX >= currentBounds.maxX { button.remoteDirections.insert(1) }
+                        else { button.remoteDirections.insert(0) }
+                    }
+                }
                 button.windowCount = localWindows.count
                 button.hasVisibleWindow = localWindows.contains { !$0.minimized }
                 button.isFocused = localWindows.contains { isActive($0) }
@@ -950,15 +972,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if matches.count > 1 {
             showWindows(matches, anchoredTo: sender)
         } else if let record = matches.first { closeHover(); toggle(record) }
-        else if bundle == "com.apple.finder" { closeHover(); newFinderWindow(on: screen) }
         else if records.contains(where: { $0.app.bundleIdentifier == bundle }) {
             let remote = records.filter { $0.app.bundleIdentifier == bundle }
             let primary = NSScreen.screens.first.flatMap(displayID) == id
             let pins = primary ? pinned : (displayPins[displayPinKey(id)] ?? [])
             if pins.contains(bundle), let record = remote.first(where: { isActive($0) }) ?? remote.first {
-                closeHover(); focus(record); moveWindow(record.element, to: id)
-            } else { showWindows(remote, anchoredTo: sender) }
+                closeHover(); if !isActive(record) { focus(record) }
+            } else if bundle == "com.apple.finder" { closeHover(); newFinderWindow(on: screen) }
+            else { showWindows(remote, anchoredTo: sender) }
         }
+        else if bundle == "com.apple.finder" { closeHover(); newFinderWindow(on: screen) }
         else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) {
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first, app.isHidden {
                 let root = AXUIElementCreateApplication(app.processIdentifier)
