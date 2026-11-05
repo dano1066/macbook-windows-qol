@@ -3,7 +3,7 @@ import ApplicationServices
 import ScreenCaptureKit
 import ServiceManagement
 
-let taskbarHeight: CGFloat = 72
+let taskbarHeight: CGFloat = 60
 let taskbarWindowGap: CGFloat = 2
 
 // A small, extensible host for desktop features. The taskbar is the first feature.
@@ -246,20 +246,21 @@ final class AppIconButton: TaskbarClickButton {
         super.draw(dirtyRect)
         guard let icon = appIcon else { return }
         // NSButton draws in flipped coordinates: y = 0 is the top.
+        NSGraphicsContext.current?.imageInterpolation = .high
         if windowCount > 1 {
             let origins = windowCount == 2
-                ? [NSPoint(x: 11, y: 6), NSPoint(x: 5, y: 12)]
-                : [NSPoint(x: 13, y: 4), NSPoint(x: 9, y: 8), NSPoint(x: 5, y: 12)]
+                ? [NSPoint(x: 9, y: 3), NSPoint(x: 3, y: 9)]
+                : [NSPoint(x: 11, y: 1), NSPoint(x: 7, y: 5), NSPoint(x: 3, y: 9)]
             for origin in origins {
-                icon.draw(in: NSRect(origin: origin, size: NSSize(width: 41, height: 41)), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                icon.draw(in: NSRect(origin: origin, size: NSSize(width: 39, height: 39)), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             }
         } else {
-            icon.draw(in: NSRect(x: 6, y: 9, width: 46, height: 46), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            icon.draw(in: NSRect(x: 4, y: 5, width: 44, height: 44), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
         if windowCount > 0 {
             (isFocused ? NSColor.systemCyan : (hasVisibleWindow ? NSColor.systemBlue : NSColor.systemBlue.withAlphaComponent(0.45))).setFill()
-            let lineHeight: CGFloat = hasVisibleWindow ? 5 : 3
-            NSBezierPath(roundedRect: NSRect(x: 10, y: bounds.height - lineHeight - 2, width: 38, height: lineHeight), xRadius: lineHeight / 2, yRadius: lineHeight / 2).fill()
+            let lineHeight: CGFloat = hasVisibleWindow ? 3 : 2
+            NSBezierPath(roundedRect: NSRect(x: 8, y: bounds.height - lineHeight - 1, width: 36, height: lineHeight), xRadius: lineHeight / 2, yRadius: lineHeight / 2).fill()
         } else if !remoteDirections.isEmpty {
             let left = remoteDirections.contains(-1)
             let right = remoteDirections.contains(1)
@@ -267,9 +268,9 @@ final class AppIconButton: TaskbarClickButton {
             let clear = NSColor.systemBlue.withAlphaComponent(0.0)
             let blue = NSColor.systemBlue
             let colors = center ? [clear, blue, clear] : (left ? [blue, clear] : [clear, blue])
-            let rect = NSRect(x: 10, y: bounds.height - 7, width: 38, height: 5)
+            let rect = NSRect(x: 8, y: bounds.height - 4, width: 36, height: 3)
             NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(roundedRect: rect, xRadius: 2.5, yRadius: 2.5).addClip()
+            NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5).addClip()
             NSGradient(colors: colors)?.draw(in: rect, angle: 0)
             NSGraphicsContext.restoreGraphicsState()
         }
@@ -581,6 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Retain only recent attempts for still-open windows. An unchanged frame
     // after a resize can mean the application ignored the request.
     var clearanceAttempts: [(element: AXUIElement, frame: CGRect, time: Date)] = []
+    var startupDockRequest: DispatchWorkItem?
     var signature = ""
     var hoverPanel: NSPanel?
     var hoverAnchor: NSRect = .zero
@@ -688,8 +690,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             restartDock = restartDock || status == 0
         }
         if restartDock { runCommand("/usr/bin/killall", ["Dock"]) }
+        // A defaults write and Dock restart can hide the Dock without updating
+        // the space macOS reserves for it. Apply the setting through the same
+        // System Events path as the taskbar toggle once Dock has relaunched.
+        let startupDockRequest = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.startupDockRequest = nil
+            var error: NSDictionary?
+            NSAppleScript(source: "tell application \"System Events\" to tell dock preferences to set autohide to true")?.executeAndReturnError(&error)
+            if let error = error { NSLog("Could not apply Dock auto-hide at startup: %@", String(describing: error)) }
+        }
+        self.startupDockRequest = startupDockRequest
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: startupDockRequest)
     }
     func applicationWillTerminate(_ notification: Notification) {
+        startupDockRequest?.cancel()
         shortcuts.stop()
         titlebarZoom.stop()
         let defaults = UserDefaults.standard
@@ -939,7 +954,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for record in local {
                 if let bundle = record.app.bundleIdentifier, !ids.contains(bundle) { ids.append(bundle) }
             }
-            let spotlight = TaskbarClickButton(frame: NSRect(x: 8, y: 3, width: 58, height: 66))
+            let spotlight = TaskbarClickButton(frame: NSRect(x: 8, y: 2, width: 52, height: 56))
             spotlight.bezelStyle = .regularSquare; spotlight.isBordered = false
             spotlight.title = "\u{F8FF}"
             spotlight.font = .systemFont(ofSize: 46)
@@ -947,14 +962,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             spotlight.toolTip = "Spotlight Search"
             spotlight.target = self; spotlight.action = #selector(openSpotlight)
             bar.addSubview(spotlight)
-            var x: CGFloat = 70
+            var x: CGFloat = 62
             for bundle in ids {
-                guard x + 58 <= screen.frame.width - 216 else { break }
+                guard x + 52 <= screen.frame.width - 216 else { break }
                 let app = local.first { $0.app.bundleIdentifier == bundle }?.app
                 let url = app?.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
                 guard let appURL = url else { continue }
-                let button = AppIconButton(frame: NSRect(x: x, y: 3, width: 58, height: 66))
+                let button = AppIconButton(frame: NSRect(x: x, y: 2, width: 52, height: 56))
                 button.bezelStyle = .regularSquare; button.isBordered = false
+                button.title = ""
                 button.appIcon = NSWorkspace.shared.icon(forFile: appURL.path)
                 button.badge = badges[bundle]
                 let localWindows = local.filter { $0.app.bundleIdentifier == bundle }
@@ -976,7 +992,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
                 button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle, displayKey: key, isPrimary: isPrimary, display: id) ?? NSMenu() }
                 bar.addSubview(button)
-                x += 62
+                x += 54
             }
             let reorder = PinReorderInteraction(bar: bar, pins: localPins, begin: { [weak self] in
                 self?.reorderingPins = true
@@ -1005,13 +1021,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !trusted {
                 let label = NSTextField(labelWithString: "Accessibility needed: remove and re-add Windows QoL in System Settings")
                 label.textColor = .white; label.font = .systemFont(ofSize: 12)
-                label.frame = NSRect(x: x + 8, y: 27, width: max(0, screen.frame.width - x - 216), height: 18)
+                label.frame = NSRect(x: x + 8, y: 21, width: max(0, screen.frame.width - x - 216), height: 18)
                 bar.addSubview(label)
             }
             for (index, bundle) in utilityIDs.enumerated() {
                 guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil else { continue }
                 let utilityX = max(0, screen.frame.width - 208 + CGFloat(index) * 40)
-                let button = TaskbarClickButton(frame: NSRect(x: utilityX, y: 15, width: 40, height: 42))
+                let button = TaskbarClickButton(frame: NSRect(x: utilityX, y: 9, width: 40, height: 42))
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 let title = bundle == "com.apple.finder" ? "Finder" : (bundle == "com.apple.Terminal" ? "Terminal" : "System Settings")
                 let symbol = bundle == "com.apple.finder" ? "folder" : (bundle == "com.apple.Terminal" ? "terminal" : "gearshape")
@@ -1027,7 +1043,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.target = self; button.action = #selector(launchUtility(_:))
                 bar.addSubview(button)
             }
-            let trash = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 88), y: 15, width: 40, height: 42))
+            let trash = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 88), y: 9, width: 40, height: 42))
             trash.bezelStyle = .regularSquare; trash.isBordered = false
             trash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Trash")
             trash.imagePosition = .imageOnly; trash.imageScaling = .scaleProportionallyDown
@@ -1035,7 +1051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             trash.onHover = { [weak self] button in self?.scheduleUtilityTooltip(button, title: "Open Trash") }
             trash.target = self; trash.action = #selector(openTrash(_:))
             bar.addSubview(trash)
-            let dockButton = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 48), y: 15, width: 40, height: 42))
+            let dockButton = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 48), y: 9, width: 40, height: 42))
             dockButton.bezelStyle = .regularSquare; dockButton.isBordered = false
             dockButton.image = NSImage(systemSymbolName: "dock.rectangle", accessibilityDescription: "Toggle Dock auto-hide")
             dockButton.contentTintColor = .white
@@ -1064,13 +1080,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let usableTop = display.minY + topInset
             let taskbarTop = display.maxY - taskbarHeight
             let desiredBottom = taskbarTop - taskbarWindowGap
+            // Windows sized by older releases may still reserve the former 72-point bar.
+            let previousTaskbarBottom = display.maxY - 72 - taskbarWindowGap
+            let alignedWithPreviousTaskbar = abs(rect.maxY - previousTaskbarBottom) <= 2
             let visibleBottomInset = screen.visibleFrame.minY - screen.frame.minY
             let alignedWithDockInset = visibleBottomInset > taskbarHeight + taskbarWindowGap + 1 &&
                 abs(rect.maxY - (display.maxY - visibleBottomInset)) <= 2
             guard abs(rect.minY - usableTop) <= 24,
-                  (abs(rect.maxY - display.maxY) <= 24 || abs(rect.maxY - taskbarTop) <= 2 || alignedWithDockInset),
+                  (abs(rect.maxY - display.maxY) <= 24 || abs(rect.maxY - taskbarTop) <= 2 || alignedWithDockInset || alignedWithPreviousTaskbar),
                   rect.height >= display.height * 0.70,
-                  (rect.maxY > desiredBottom + 1 || alignedWithDockInset),
+                  (rect.maxY > desiredBottom + 1 || alignedWithDockInset || alignedWithPreviousTaskbar),
                   (attribute(record.element, "AXFullScreen" as CFString, as: Bool.self) ?? false) == false else { continue }
             var size = CGSize(width: rect.width, height: desiredBottom - rect.minY)
             guard size.height > 100, let value = AXValueCreate(.cgSize, &size) else { continue }
@@ -1286,6 +1305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         placeOpenedWindow(bundle: "com.apple.finder", previous: previous, on: display, allowExisting: true)
     }
     @objc func toggleDockAutoHide() {
+        startupDockRequest?.cancel()
+        startupDockRequest = nil
         // System Events applies the global Dock preference without restarting Dock.
         let source = "tell application \"System Events\" to tell dock preferences to set autohide to not autohide"
         var error: NSDictionary?
