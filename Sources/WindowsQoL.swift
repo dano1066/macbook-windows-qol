@@ -180,6 +180,8 @@ final class PinReorderInteraction {
 }
 
 class TaskbarClickButton: HoverButton {
+    var contextMenu: (() -> NSMenu)?
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() ?? super.menu(for: event) }
     func showClickFeedback() {
         wantsLayer = true
         guard let layer = layer else { return }
@@ -209,12 +211,10 @@ final class AppIconButton: TaskbarClickButton {
     var hasVisibleWindow = false
     var isFocused = false
     var remoteDirections: Set<Int> = []
-    var contextMenu: (() -> NSMenu)?
     var onDragStart: ((AppIconButton) -> Void)?
     var onDragMove: ((CGFloat) -> Void)?
     var onDragEnd: (() -> Void)?
     var canReorder = false
-    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
     override func mouseDown(with event: NSEvent) {
         guard let window = window else { return }
         let start = window.convertPoint(toScreen: event.locationInWindow)
@@ -929,7 +929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panels[id] = panel
             panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: taskbarHeight), display: false)
             let bar = NSView(frame: NSRect(x: 0, y: 0, width: screen.frame.width, height: taskbarHeight))
-            let utilityIDs = ["com.apple.Terminal", "com.apple.systempreferences"]
+            let utilityIDs = ["com.apple.finder", "com.apple.Terminal", "com.apple.systempreferences"]
             let isPrimary = id == primary
             let key = displayPinKey(id)
             let localPins = isPrimary ? pinned : (displayPins[key] ?? [])
@@ -948,7 +948,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bar.addSubview(spotlight)
             var x: CGFloat = 70
             for bundle in ids {
-                guard x + 58 <= screen.frame.width - 200 else { break }
+                guard x + 58 <= screen.frame.width - 216 else { break }
                 let app = local.first { $0.app.bundleIdentifier == bundle }?.app
                 let url = app?.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
                 guard let appURL = url else { continue }
@@ -969,7 +969,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.windowCount = localWindows.count
                 button.hasVisibleWindow = localWindows.contains { !$0.minimized }
                 button.isFocused = localWindows.contains { record in frontmost[id].map { CFEqual($0, record.element) } ?? false }
-                button.toolTip = app?.localizedName ?? FileManager.default.displayName(atPath: appURL.path)
+                if localWindows.isEmpty { button.toolTip = app?.localizedName ?? FileManager.default.displayName(atPath: appURL.path) }
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
                 button.target = self; button.action = #selector(appClicked(_:))
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
@@ -1009,29 +1009,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             for (index, bundle) in utilityIDs.enumerated() {
                 guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil else { continue }
-                let utilityX = max(0, screen.frame.width - 196 + CGFloat(index) * 48)
-                let button = TaskbarClickButton(frame: NSRect(x: utilityX, y: 15, width: 44, height: 42))
+                let utilityX = max(0, screen.frame.width - 208 + CGFloat(index) * 40)
+                let button = TaskbarClickButton(frame: NSRect(x: utilityX, y: 15, width: 40, height: 42))
                 button.bezelStyle = .regularSquare; button.isBordered = false
-                button.toolTip = bundle == "com.apple.Terminal" ? "Terminal" : "System Settings"
-                button.image = NSImage(systemSymbolName: bundle == "com.apple.Terminal" ? "terminal" : "gearshape", accessibilityDescription: button.toolTip)
+                let title = bundle == "com.apple.finder" ? "Finder" : (bundle == "com.apple.Terminal" ? "Terminal" : "System Settings")
+                let symbol = bundle == "com.apple.finder" ? "folder" : (bundle == "com.apple.Terminal" ? "terminal" : "gearshape")
+                button.onHover = { [weak self] button in self?.scheduleUtilityTooltip(button, title: "Open \(title)") }
+                button.setAccessibilityLabel("Open \(title)")
+                button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+                if bundle != "com.apple.systempreferences" {
+                    button.contextMenu = { [weak self] in self?.locationMenu(bundle: bundle, display: id) ?? NSMenu() }
+                }
                 button.imagePosition = .imageOnly; button.imageScaling = .scaleProportionallyDown
                 button.contentTintColor = .white
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
                 button.target = self; button.action = #selector(launchUtility(_:))
                 bar.addSubview(button)
             }
-            let trash = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 100), y: 15, width: 44, height: 42))
+            let trash = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 88), y: 15, width: 40, height: 42))
             trash.bezelStyle = .regularSquare; trash.isBordered = false
             trash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Trash")
             trash.imagePosition = .imageOnly; trash.imageScaling = .scaleProportionallyDown
-            trash.contentTintColor = .white; trash.toolTip = "Open Trash"
+            trash.contentTintColor = .white; trash.setAccessibilityLabel("Open Trash")
+            trash.onHover = { [weak self] button in self?.scheduleUtilityTooltip(button, title: "Open Trash") }
             trash.target = self; trash.action = #selector(openTrash(_:))
             bar.addSubview(trash)
-            let dockButton = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 52), y: 15, width: 44, height: 42))
+            let dockButton = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 48), y: 15, width: 40, height: 42))
             dockButton.bezelStyle = .regularSquare; dockButton.isBordered = false
             dockButton.image = NSImage(systemSymbolName: "dock.rectangle", accessibilityDescription: "Toggle Dock auto-hide")
             dockButton.contentTintColor = .white
-            dockButton.toolTip = "Toggle Apple Dock auto-hide (all displays)"
+            dockButton.setAccessibilityLabel("Toggle Apple Dock auto-hide (all displays)")
+            dockButton.onHover = { [weak self] button in self?.scheduleUtilityTooltip(button, title: "Toggle Dock auto-hide") }
             dockButton.target = self; dockButton.action = #selector(toggleDockAutoHide)
             bar.addSubview(dockButton)
             panel.contentView = bar; panel.orderFrontRegardless()
@@ -1075,11 +1083,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func launchUtility(_ sender: NSButton) {
         guard let bundle = sender.identifier?.rawValue, let screen = sender.window?.screen,
               let display = displayID(screen) else { return }
+        if bundle == "com.apple.finder" { newFinderWindow(on: screen, activate: false); return }
         let previous = applicationWindows(bundle)
         if bundle == "com.apple.Terminal" {
             // With no target window, Terminal creates a new window. `cd` uses the
             // shell's home directory without touching existing Terminal sessions.
-            let source = "tell application id \"com.apple.Terminal\"\ndo script \"cd\"\nactivate\nend tell"
+            let source = "tell application id \"com.apple.Terminal\"\ndo script \"cd\"\nend tell"
             var error: NSDictionary?
             NSAppleScript(source: source)?.executeAndReturnError(&error)
             if let error = error {
@@ -1095,6 +1104,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard error == nil else { return }
             DispatchQueue.main.async { self?.placeOpenedWindow(bundle: bundle, previous: previous, on: display, allowExisting: true) }
         }
+    }
+    func locationMenu(bundle: String, display: CGDirectDisplayID) -> NSMenu {
+        let menu = NSMenu()
+        let name = bundle == "com.apple.finder" ? "Finder" : "Terminal"
+        let locations: [(String, String?)] = [
+            ("Open \(name)", nil),
+            ("Open in Desktop", NSHomeDirectory() + "/Desktop"),
+            ("Open in Downloads", NSHomeDirectory() + "/Downloads"),
+            ("Open in Documents", NSHomeDirectory() + "/Documents"),
+            ("Open in Home", NSHomeDirectory())
+        ]
+        for (title, path) in locations {
+            let item = NSMenuItem(title: title, action: #selector(openUtilityLocation(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = ["bundle": bundle, "display": NSNumber(value: display), "path": path ?? ""] as [String: Any]
+            menu.addItem(item)
+        }
+        return menu
+    }
+    @objc func openUtilityLocation(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: Any],
+              let bundle = info["bundle"] as? String, let display = (info["display"] as? NSNumber)?.uint32Value,
+              let path = info["path"] as? String else { return }
+        if path.isEmpty, bundle == "com.apple.finder", let screen = NSScreen.screens.first(where: { displayID($0) == display }) {
+            newFinderWindow(on: screen, activate: false); return
+        }
+        let previous = applicationWindows(bundle)
+        let source: String
+        if bundle == "com.apple.finder" {
+            let escaped = path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            source = "tell application id \"com.apple.finder\"\nmake new Finder window to (POSIX file \"\(escaped)\" as alias)\nend tell"
+        } else {
+            let command = path.isEmpty ? "cd" : "cd '" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            source = "tell application id \"com.apple.Terminal\"\ndo script \"\(escaped)\"\nend tell"
+        }
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        if let error = error {
+            let alert = NSAlert(); alert.messageText = "Couldn’t open a new \(bundle == "com.apple.finder" ? "Finder" : "Terminal") window"
+            alert.informativeText = "Check that Windows QoL can control the app in System Settings → Privacy & Security → Automation and that the folder exists.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
+            alert.runModal(); return
+        }
+        placeOpenedWindow(bundle: bundle, previous: previous, on: display, allowExisting: false)
     }
     func appContextMenu(bundle: String, displayKey: String, isPrimary: Bool, display: CGDirectDisplayID) -> NSMenu {
         let menu = NSMenu()
@@ -1209,11 +1262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else if attempts >= 100 { timer.invalidate() }
         }
     }
-    func newFinderWindow(on screen: NSScreen) {
+    func newFinderWindow(on screen: NSScreen, activate: Bool = true) {
         guard let display = displayID(screen) else { return }
         let previous = applicationWindows("com.apple.finder")
         var error: NSDictionary?
-        NSAppleScript(source: "tell application \"Finder\"\nactivate\nmake new Finder window\nend tell")?.executeAndReturnError(&error)
+        NSAppleScript(source: "tell application \"Finder\"\n\(activate ? "activate\n" : "")make new Finder window\nend tell")?.executeAndReturnError(&error)
         if let error = error {
             let alert = NSAlert(); alert.messageText = "Couldn’t open a Finder window"
             alert.informativeText = "Allow Windows QoL to control Finder in System Settings → Privacy & Security → Automation.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
@@ -1276,7 +1329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     func scheduleHover(_ button: HoverButton) {
-        hoverPending?.cancel()
+        closeHover()
         let pending = DispatchWorkItem { [weak self, weak button] in
             guard let self = self, let button = button, let window = button.window,
                   let bundle = button.identifier?.rawValue, let screen = window.screen,
@@ -1284,10 +1337,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
             guard rect.contains(NSEvent.mouseLocation) else { return }
             let matches = self.records.filter { $0.displayID == id && $0.app.bundleIdentifier == bundle }
-            if matches.count > 1 { self.showWindows(matches, anchoredTo: button) }
+            if !matches.isEmpty { self.showWindows(matches, anchoredTo: button) }
         }
         hoverPending = pending
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: pending)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: pending)
+    }
+    func scheduleUtilityTooltip(_ button: HoverButton, title: String) {
+        closeHover()
+        let pending = DispatchWorkItem { [weak self, weak button] in
+            guard let self = self, let button = button, let window = button.window, let screen = window.screen else { return }
+            let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
+            guard rect.contains(NSEvent.mouseLocation) else { return }
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 12); label.textColor = .white
+            label.sizeToFit()
+            let width = label.frame.width + 20, height: CGFloat = 28
+            let x = min(max(screen.visibleFrame.minX + 8, rect.midX - width / 2), screen.visibleFrame.maxX - width - 8)
+            let panel = NSPanel(contentRect: NSRect(x: x, y: window.frame.maxY + 4, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            panel.isOpaque = false; panel.backgroundColor = NSColor(calibratedWhite: 0.16, alpha: 0.98)
+            panel.level = .floating; panel.hasShadow = true; panel.isReleasedWhenClosed = false
+            panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+            label.frame.origin = NSPoint(x: 10, y: (height - label.frame.height) / 2)
+            panel.contentView?.addSubview(label)
+            self.hoverPanel = panel; panel.orderFrontRegardless()
+            self.hoverMonitor = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                if !rect.contains(NSEvent.mouseLocation) { self?.closeHover() }
+            }
+        }
+        hoverPending = pending
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: pending)
     }
     func closeHover() {
         hoverPending?.cancel(); hoverPending = nil
@@ -1317,7 +1395,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var cards: [WindowButton] = []
         for (index, record) in matches.enumerated() {
             let row = WindowButton(frame: NSRect(x: padding + CGFloat(index) * (cardWidth + gap), y: padding, width: cardWidth, height: cardHeight))
-            row.title = (record.minimized ? "◌  " : "") + (record.title.isEmpty ? (record.app.localizedName ?? "Window") : record.title)
+            let appName = record.app.localizedName ?? "Window"
+            let windowTitle = record.title.isEmpty || record.title == appName ? appName : "\(appName) — \(record.title)"
+            row.title = (record.minimized ? "◌  " : "") + windowTitle
             row.record = record; row.target = self; row.action = #selector(windowSelected(_:))
             row.bezelStyle = .regularSquare; row.isBordered = false; row.alignment = .center
             row.contentTintColor = .white; row.font = .systemFont(ofSize: 13)
