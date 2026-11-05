@@ -68,6 +68,26 @@ func windows(previous: [WindowRecord]) -> [WindowRecord] {
     return result
 }
 
+// Quartz supplies windows in front-to-back order; match them to tracked AX windows
+// by process and geometry, avoiding guesses when the match is ambiguous.
+func frontmostWindowsByDisplay(_ records: [WindowRecord]) -> [CGDirectDisplayID: AXUIElement] {
+    guard let listed = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [:] }
+    var result: [CGDirectDisplayID: AXUIElement] = [:]
+    for info in listed {
+        guard (info[kCGWindowLayer as String] as? Int) == 0,
+              let pid = info[kCGWindowOwnerPID as String] as? Int,
+              let bounds = info[kCGWindowBounds as String] as? [String: Any],
+              let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { continue }
+        let matches = records.filter { record in
+            guard !record.minimized, record.app.processIdentifier == pid, let frame = windowRect(record.element) else { return false }
+            return abs(frame.minX - rect.minX) + abs(frame.minY - rect.minY) + abs(frame.width - rect.width) + abs(frame.height - rect.height) < 12
+        }
+        guard matches.count == 1, let record = matches.first, result[record.displayID] == nil else { continue }
+        result[record.displayID] = record.element
+    }
+    return result
+}
+
 class HoverButton: NSButton {
     var onHover: ((HoverButton) -> Void)?
     override func updateTrackingAreas() {
@@ -76,6 +96,81 @@ class HoverButton: NSButton {
         super.updateTrackingAreas()
     }
     override func mouseEntered(with event: NSEvent) { onHover?(self) }
+}
+
+// Keep the temporary order in the view until the drop animation finishes.
+final class PinReorderInteraction {
+    weak var bar: NSView?
+    weak var dragged: AppIconButton?
+    let pins: [String]
+    var visibleOrder: [String] = []
+    var originalX: CGFloat = 0
+    var slotX: [CGFloat] = []
+    let begin: () -> Void
+    let commit: ([String]) -> Void
+    let finishFeedback: () -> Void
+
+    init(bar: NSView, pins: [String], begin: @escaping () -> Void, commit: @escaping ([String]) -> Void, finishFeedback: @escaping () -> Void) {
+        self.bar = bar; self.pins = pins; self.begin = begin; self.commit = commit; self.finishFeedback = finishFeedback
+    }
+    var buttons: [AppIconButton] { bar?.subviews.compactMap { $0 as? AppIconButton } ?? [] }
+    func showUnpinnedFeedback() {
+        begin()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            for button in buttons where !pins.contains(button.identifier?.rawValue ?? "") { button.animator().alphaValue = 0.3 }
+        }
+    }
+    func endUnpinnedFeedback() {
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            for button in buttons { button.animator().alphaValue = 1 }
+        }, completionHandler: { [self] in finishFeedback() })
+    }
+    func start(_ button: AppIconButton) {
+        guard let bar = bar else { return }
+        begin()
+        dragged = button; originalX = button.frame.minX
+        let pinnedButtons = buttons.filter { pins.contains($0.identifier?.rawValue ?? "") }.sorted { $0.frame.minX < $1.frame.minX }
+        visibleOrder = pinnedButtons.compactMap { $0.identifier?.rawValue }
+        slotX = pinnedButtons.map { $0.frame.minX }
+        bar.addSubview(button, positioned: .above, relativeTo: nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            for other in buttons where !pins.contains(other.identifier?.rawValue ?? "") { other.animator().alphaValue = 0.3 }
+        }
+    }
+    func move(_ delta: CGFloat) {
+        guard let button = dragged, let id = button.identifier?.rawValue, !slotX.isEmpty else { return }
+        let x = min(max(originalX + delta, slotX[0] - 20), slotX[slotX.count - 1] + 20)
+        button.setFrameOrigin(NSPoint(x: x, y: button.frame.minY))
+        let target = slotX.enumerated().min { abs($0.element - x) < abs($1.element - x) }!.offset
+        guard let old = visibleOrder.firstIndex(of: id), old != target else { return }
+        visibleOrder.remove(at: old); visibleOrder.insert(id, at: target)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            for other in buttons where other !== button {
+                if let name = other.identifier?.rawValue, let index = visibleOrder.firstIndex(of: name) {
+                    other.animator().setFrameOrigin(NSPoint(x: slotX[index], y: other.frame.minY))
+                }
+            }
+        }
+    }
+    func end() {
+        guard let button = dragged, let id = button.identifier?.rawValue, let index = visibleOrder.firstIndex(of: id) else { return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            button.animator().setFrameOrigin(NSPoint(x: slotX[index], y: button.frame.minY))
+            for other in buttons { other.animator().alphaValue = 1 }
+        }, completionHandler: { [self] in
+            button.layer?.backgroundColor = NSColor.clear.cgColor
+            var order = visibleOrder.makeIterator()
+            let visible = Set(visibleOrder)
+            commit(pins.map { visible.contains($0) ? (order.next() ?? $0) : $0 })
+        })
+    }
 }
 
 class TaskbarClickButton: HoverButton {
@@ -103,23 +198,39 @@ class TaskbarClickButton: HoverButton {
 
 final class AppIconButton: TaskbarClickButton {
     var appIcon: NSImage?
+    var badge: String? { didSet { if badge != oldValue { needsDisplay = true } } }
     var windowCount = 0
     var hasVisibleWindow = false
     var isFocused = false
     var remoteDirections: Set<Int> = []
     var contextMenu: (() -> NSMenu)?
-    var onReorder: ((CGFloat) -> Void)?
+    var onDragStart: ((AppIconButton) -> Void)?
+    var onDragMove: ((CGFloat) -> Void)?
+    var onDragEnd: (() -> Void)?
+    var canReorder = false
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
     override func mouseDown(with event: NSEvent) {
         guard let window = window else { return }
         let start = window.convertPoint(toScreen: event.locationInWindow)
         var dragging = false
+        if canReorder {
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
+            layer?.cornerRadius = 10
+            NSCursor.closedHand.push()
+        }
         while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             let point = window.convertPoint(toScreen: next.locationInWindow)
-            if next.type == .leftMouseDragged && abs(point.x - start.x) > 8 { dragging = true }
+            if next.type == .leftMouseDragged && !dragging && onDragStart != nil && hypot(point.x - start.x, point.y - start.y) > 8 {
+                dragging = true
+                onDragStart?(self)
+            }
+            if next.type == .leftMouseDragged && dragging { onDragMove?(point.x - start.x) }
             if next.type == .leftMouseUp {
-                if dragging { onReorder?(point.x) }
+                if canReorder { NSCursor.pop() }
+                if dragging { onDragEnd?() }
                 else if bounds.contains(convert(next.locationInWindow, from: nil)) { showClickFeedback(); performClick(nil) }
+                if !dragging { layer?.backgroundColor = NSColor.clear.cgColor }
                 break
             }
         }
@@ -155,6 +266,63 @@ final class AppIconButton: TaskbarClickButton {
             NSGradient(colors: colors)?.draw(in: rect, angle: 0)
             NSGraphicsContext.restoreGraphicsState()
         }
+        if let badge = badge, !badge.isEmpty {
+            let text = badge as NSString
+            let font = NSFont.boldSystemFont(ofSize: 11)
+            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+            let size = text.size(withAttributes: attributes)
+            let width = min(bounds.width - 4, max(18, size.width + 8))
+            let rect = NSRect(x: bounds.width - width - 1, y: 2, width: width, height: 18)
+            NSColor.systemRed.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9).fill()
+            NSGraphicsContext.saveGraphicsState()
+            rect.insetBy(dx: 2, dy: 0).clip()
+            text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attributes)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+    }
+}
+
+// The Dock exposes its badge text through Accessibility, even when hidden.
+// Match tiles by app bundle URL rather than a potentially ambiguous app name.
+final class DockBadges {
+    private var dockPID: pid_t = 0
+    private var tiles: [String: AXUIElement] = [:]
+    private var lastScan = Date.distantPast
+
+    func read() -> [String: String] {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first(where: { !$0.isTerminated }) else {
+            dockPID = 0; tiles.removeAll(); return [:]
+        }
+        if dockPID != dock.processIdentifier {
+            dockPID = dock.processIdentifier; tiles.removeAll(); lastScan = .distantPast
+        }
+        if Date().timeIntervalSince(lastScan) >= 5 {
+            var found: [String: AXUIElement] = [:]
+            collect(AXUIElementCreateApplication(dockPID), depth: 0, into: &found)
+            tiles = found
+            lastScan = Date()
+        }
+        var badges: [String: String] = [:]
+        var stale = false
+        for (bundle, tile) in tiles {
+            var value: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(tile, "AXStatusLabel" as CFString, &value)
+            if result == .success, let label = value as? String, !label.isEmpty { badges[bundle] = label }
+            else if result != .success && result != .noValue && result != .attributeUnsupported { stale = true }
+        }
+        if stale { lastScan = .distantPast }
+        return badges
+    }
+
+    private func collect(_ element: AXUIElement, depth: Int, into tiles: inout [String: AXUIElement]) {
+        guard depth < 6 else { return }
+        if let url: URL = attribute(element, kAXURLAttribute as CFString),
+           let bundle = Bundle(url: url)?.bundleIdentifier {
+            tiles[bundle] = element
+        }
+        let children: [AXUIElement] = attribute(element, kAXChildrenAttribute as CFString) ?? []
+        for child in children { collect(child, depth: depth + 1, into: &tiles) }
     }
 }
 
@@ -398,6 +566,7 @@ final class TaskbarPanel: NSPanel {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var reorderingPins = false
     let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var panels: [CGDirectDisplayID: TaskbarPanel] = [:]
     var timer: Timer?
@@ -408,6 +577,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hoverPending: DispatchWorkItem?
     var hoverMonitor: Timer?
     var hoverLastInside = Date()
+    var pendingPreviewCloses: [(WindowRecord, Date)] = []
+    var previewAnimating = false
     var permissionsWindow: NSWindow?
     var settingsContent: NSView?
     var sidebarButtons: [NSButton] = []
@@ -420,6 +591,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var loginButton: NSButton?
     let shortcuts = WindowsShortcuts()
     let titlebarZoom = TitlebarZoom()
+    let dockBadges = DockBadges()
+    var badges: [String: String] = [:]
     let shortcutsKey = "fnShortcutsEnabled"
     var shortcutsEnabled: Bool {
         get { UserDefaults.standard.object(forKey: shortcutsKey) as? Bool ?? true }
@@ -486,8 +659,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             task.waitUntilExit()
             return (task.terminationStatus, String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
         } catch { return (-1, "") }
-    var pendingPreviewCloses: [(WindowRecord, Date)] = []
-    var previewAnimating = false
     }
     func prepareDock() {
         let defaults = UserDefaults.standard
@@ -718,16 +889,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; refresh() }
     @objc func refresh() {
+        guard !reorderingPins else { return }
         if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
         let trusted = AXIsProcessTrusted()
+        let latestBadges = trusted ? dockBadges.read() : [:]
+        if latestBadges != badges {
+            badges = latestBadges
+            for panel in panels.values {
+                for button in panel.contentView?.subviews.compactMap({ $0 as? AppIconButton }) ?? [] {
+                    button.badge = button.identifier.flatMap { badges[$0.rawValue] }
+                }
+            }
+        }
         if trusted && !titlebarZoom.isRunning { _ = titlebarZoom.start() }
         if !trusted && titlebarZoom.isRunning { titlebarZoom.stop() }
         if shortcutsEnabled && trusted && !shortcuts.isRunning, shortcuts.start() { signature = "" }
         if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
         records = trusted ? windows(previous: records) : []
         if trusted { keepMaximizedWindowsAboveTaskbars() }
+        let frontmost = frontmostWindowsByDisplay(records)
         let displayPinState = displayPins.keys.sorted().map { "\($0):\((displayPins[$0] ?? []).joined(separator: ","))" }.joined(separator: "|")
-        let state = "\(trusted)|\(pinned.joined(separator: ","))|\(displayPinState)|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized):\(isActive($0))" }.sorted().joined(separator: "|")
+        let state = "\(trusted)|\(pinned.joined(separator: ","))|\(displayPinState)|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { record in "\(record.app.processIdentifier):\(record.displayID):\(record.title):\(record.minimized):\(frontmost[record.displayID].map { CFEqual($0, record.element) } ?? false)" }.sorted().joined(separator: "|")
         guard state != signature else { return }
         signature = state
         rebuildMenu()
@@ -764,6 +946,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let button = AppIconButton(frame: NSRect(x: x, y: 3, width: 58, height: 66))
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 button.appIcon = NSWorkspace.shared.icon(forFile: appURL.path)
+                button.badge = badges[bundle]
                 let localWindows = local.filter { $0.app.bundleIdentifier == bundle }
                 if localPins.contains(bundle) && localWindows.isEmpty {
                     let currentBounds = CGDisplayBounds(id)
@@ -776,18 +959,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 button.windowCount = localWindows.count
                 button.hasVisibleWindow = localWindows.contains { !$0.minimized }
-                button.isFocused = localWindows.contains { isActive($0) }
+                button.isFocused = localWindows.contains { record in frontmost[id].map { CFEqual($0, record.element) } ?? false }
                 button.toolTip = app?.localizedName ?? FileManager.default.displayName(atPath: appURL.path)
                 button.identifier = NSUserInterfaceItemIdentifier(bundle)
                 button.target = self; button.action = #selector(appClicked(_:))
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
-                button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle, displayKey: key, isPrimary: isPrimary) ?? NSMenu() }
-                if localPins.contains(bundle) {
-                    let leftEdge = screen.frame.minX + 70
-                    button.onReorder = { [weak self] screenX in self?.reorderPin(bundle, targetX: screenX - leftEdge, displayKey: key, isPrimary: isPrimary) }
-                }
+                button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle, displayKey: key, isPrimary: isPrimary, display: id) ?? NSMenu() }
                 bar.addSubview(button)
                 x += 62
+            }
+            let reorder = PinReorderInteraction(bar: bar, pins: localPins, begin: { [weak self] in
+                self?.reorderingPins = true
+                self?.closeHover()
+            }, commit: { [weak self] order in
+                guard let self = self else { return }
+                if isPrimary { self.pinned = order }
+                else { var all = self.displayPins; all[key] = order; self.displayPins = all }
+                self.reorderingPins = false
+                self.refresh()
+            }, finishFeedback: { [weak self] in
+                self?.reorderingPins = false
+                self?.refresh()
+            })
+            for button in bar.subviews.compactMap({ $0 as? AppIconButton }) {
+                button.canReorder = localPins.contains(button.identifier?.rawValue ?? "")
+                if button.canReorder {
+                    button.onDragStart = { [reorder] in reorder.start($0) }
+                    button.onDragMove = { [reorder] in reorder.move($0) }
+                    button.onDragEnd = { [reorder] in reorder.end() }
+                } else {
+                    button.onDragStart = { [reorder] _ in reorder.showUnpinnedFeedback() }
+                    button.onDragEnd = { [reorder] in reorder.endUnpinnedFeedback() }
+                }
             }
             if !trusted {
                 let label = NSTextField(labelWithString: "Accessibility needed: remove and re-add Windows QoL in System Settings")
@@ -878,8 +1081,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.placeOpenedWindow(bundle: bundle, previous: previous, on: display, allowExisting: true) }
         }
     }
-    func appContextMenu(bundle: String, displayKey: String, isPrimary: Bool) -> NSMenu {
+    func appContextMenu(bundle: String, displayKey: String, isPrimary: Bool, display: CGDirectDisplayID) -> NSMenu {
         let menu = NSMenu()
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).contains(where: { !$0.isTerminated })
+        if running && newWindowMenuItem(bundle: bundle) != nil {
+            let newWindow = NSMenuItem(title: "New Window", action: #selector(openNewWindow(_:)), keyEquivalent: "")
+            newWindow.target = self
+            newWindow.representedObject = ["bundle": bundle, "display": NSNumber(value: display)] as [String: Any]
+            menu.addItem(newWindow)
+            menu.addItem(.separator())
+        }
         let primaryItem = NSMenuItem(title: pinned.contains(bundle) ? "Unpin from primary taskbar" : "Pin to primary taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
         primaryItem.target = self; primaryItem.representedObject = ["bundle": bundle, "scope": "primary"]; menu.addItem(primaryItem)
         if !isPrimary {
@@ -887,12 +1098,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let localItem = NSMenuItem(title: isPinnedHere ? "Unpin from this taskbar" : "Pin to this taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
             localItem.target = self; localItem.representedObject = ["bundle": bundle, "scope": displayKey]; menu.addItem(localItem)
         }
-        if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).contains(where: { !$0.isTerminated }) {
+        if running {
             menu.addItem(.separator())
             let quit = NSMenuItem(title: "Quit App", action: #selector(quitApplication(_:)), keyEquivalent: "")
             quit.target = self; quit.representedObject = bundle; menu.addItem(quit)
         }
         return menu
+    }
+    func newWindowMenuItem(bundle: String) -> AXUIElement? {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first(where: { !$0.isTerminated }) else { return nil }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        guard let menuBar: AXUIElement = attribute(root, kAXMenuBarAttribute as CFString) else { return nil }
+        func find(_ element: AXUIElement, depth: Int) -> AXUIElement? {
+            guard depth <= 5 else { return nil }
+            let role: String = attribute(element, kAXRoleAttribute as CFString) ?? ""
+            let title: String = attribute(element, kAXTitleAttribute as CFString) ?? ""
+            let enabled: Bool = attribute(element, kAXEnabledAttribute as CFString) ?? false
+            if role == kAXMenuItemRole as String && enabled &&
+                (title == "New Window" || title == "New Finder Window") {
+                var actions: CFArray?
+                if AXUIElementCopyActionNames(element, &actions) == .success,
+                   let names = actions as? [String], names.contains(kAXPressAction as String) { return element }
+            }
+            let children: [AXUIElement] = attribute(element, kAXChildrenAttribute as CFString) ?? []
+            for child in children { if let found = find(child, depth: depth + 1) { return found } }
+            return nil
+        }
+        return find(menuBar, depth: 0)
+    }
+    @objc func openNewWindow(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? [String: Any],
+              let bundle = context["bundle"] as? String,
+              let display = (context["display"] as? NSNumber)?.uint32Value,
+              let item = newWindowMenuItem(bundle: bundle) else { return }
+        let previous = applicationWindows(bundle)
+        if AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
+            placeOpenedWindow(bundle: bundle, previous: previous, on: display, allowExisting: false)
+        }
     }
     @objc func quitApplication(_ sender: NSMenuItem) {
         guard let bundle = sender.representedObject as? String else { return }
@@ -910,15 +1152,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if pins.isEmpty { all.removeValue(forKey: scope) } else { all[scope] = pins }
             displayPins = all
         }
-        refresh()
-    }
-    func reorderPin(_ bundle: String, targetX: CGFloat, displayKey: String, isPrimary: Bool) {
-        var items = isPrimary ? pinned : (displayPins[displayKey] ?? [])
-        guard let oldIndex = items.firstIndex(of: bundle) else { return }
-        items.remove(at: oldIndex)
-        let target = min(max(Int((targetX / 62).rounded(.down)), 0), items.count)
-        items.insert(bundle, at: target)
-        if isPrimary { pinned = items } else { var all = displayPins; all[displayKey] = items; displayPins = all }
         refresh()
     }
     func applicationWindows(_ bundle: String) -> [AXUIElement] {
@@ -1044,6 +1277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func closeHover() {
         hoverPending?.cancel(); hoverPending = nil
         hoverMonitor?.invalidate(); hoverMonitor = nil
+        pendingPreviewCloses.removeAll(); previewAnimating = false
         hoverPanel?.close(); hoverPanel = nil
     }
     func showWindows(_ matches: [WindowRecord], anchoredTo button: NSButton) {
@@ -1060,6 +1294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .floating; panel.hasShadow = true; panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        scroll.autoresizingMask = [.width, .height]
         scroll.hasHorizontalScroller = contentWidth > width
         scroll.hasVerticalScroller = false
         scroll.drawsBackground = false
@@ -1075,6 +1310,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             row.imageScaling = .scaleProportionallyDown; row.image = record.app.icon
             row.wantsLayer = true; row.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
             row.layer?.cornerRadius = 8; row.toolTip = row.title
+            let close = WindowButton(frame: NSRect(x: cardWidth - 30, y: 6, width: 24, height: 24))
+            close.record = record; close.target = self; close.action = #selector(closePreviewWindow(_:))
+            close.title = "×"; close.font = .systemFont(ofSize: 19, weight: .medium)
+            close.isBordered = false; close.contentTintColor = .white
+            close.wantsLayer = true; close.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.75).cgColor
+            close.layer?.cornerRadius = 12; close.toolTip = "Close window"
+            close.setAccessibilityLabel("Close \(row.title)")
+            close.isEnabled = (attribute(record.element, kAXCloseButtonAttribute as CFString) as AXUIElement?) != nil
+            row.addSubview(close)
             list.addSubview(row)
             cards.append(row)
         }
@@ -1084,6 +1328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadWindowPreviews(matches, cards: cards, panel: panel)
         hoverMonitor = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self = self, let panel = self.hoverPanel else { return }
+            self.checkPreviewCloses(in: panel)
             let mouse = NSEvent.mouseLocation
             let safeArea = panel.frame.union(self.hoverAnchor).insetBy(dx: -28, dy: -20)
             if safeArea.contains(mouse) { self.hoverLastInside = Date() }
@@ -1119,41 +1364,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let record = sender.record else { return }
         closeHover(); focus(record)
     }
-    func isActive(_ record: WindowRecord) -> Bool {
-        guard !record.minimized, NSWorkspace.shared.frontmostApplication?.processIdentifier == record.app.processIdentifier else { return false }
-        let root = AXUIElementCreateApplication(record.app.processIdentifier)
-        guard let focused: AXUIElement = attribute(root, kAXFocusedWindowAttribute as CFString) else { return false }
-        return CFEqual(focused, record.element)
-    }
-    func toggle(_ record: WindowRecord) {
-        if isActive(record) {
-            let result = AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
-            if result != .success { focus(record) }
-        } else { focus(record) }
-    }
-    func focus(_ record: WindowRecord) {
-        if record.minimized { AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
-        record.app.activate(options: [])
-        AXUIElementPerformAction(record.element, kAXRaiseAction as CFString)
-    }
-}
-final class WindowButton: NSButton { var record: WindowRecord? }
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
-        pendingPreviewCloses.removeAll(); previewAnimating = false
-        scroll.autoresizingMask = [.width, .height]
-            let close = WindowButton(frame: NSRect(x: cardWidth - 30, y: 6, width: 24, height: 24))
-            close.record = record; close.target = self; close.action = #selector(closePreviewWindow(_:))
-            close.title = "×"; close.font = .systemFont(ofSize: 19, weight: .medium)
-            close.isBordered = false; close.contentTintColor = .white
-            close.wantsLayer = true; close.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.75).cgColor
-            close.layer?.cornerRadius = 12; close.toolTip = "Close window"
-            close.setAccessibilityLabel("Close \(row.title)")
-            close.isEnabled = (attribute(record.element, kAXCloseButtonAttribute as CFString) as AXUIElement?) != nil
-            row.addSubview(close)
-            self.checkPreviewCloses(in: panel)
     @objc func closePreviewWindow(_ sender: WindowButton) {
         guard let record = sender.record else { return }
         let button: AXUIElement? = attribute(record.element, kAXCloseButtonAttribute as CFString)
@@ -1215,3 +1425,63 @@ app.run()
             }
         }
     }
+    func isActive(_ record: WindowRecord) -> Bool {
+        guard !record.minimized, NSWorkspace.shared.frontmostApplication?.processIdentifier == record.app.processIdentifier else { return false }
+        let root = AXUIElementCreateApplication(record.app.processIdentifier)
+        guard let focused: AXUIElement = attribute(root, kAXFocusedWindowAttribute as CFString) else { return false }
+        return CFEqual(focused, record.element)
+    }
+    func toggle(_ record: WindowRecord) {
+        let frontmost = frontmostWindowsByDisplay(records)[record.displayID]
+        if !record.minimized && (frontmost.map { CFEqual($0, record.element) } ?? isActive(record)) {
+            let result = AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            if result != .success { focus(record, preserveRemoteMinimized: true) }
+        } else { focus(record, preserveRemoteMinimized: true) }
+    }
+    func focus(_ record: WindowRecord, preserveRemoteMinimized: Bool = false) {
+        // Activating an app can raise all of its windows. Preserve the frontmost
+        // windows on other displays without activating their applications.
+        let remoteFrontmost = preserveRemoteMinimized ? frontmostWindowsByDisplay(records).filter { display, window in
+            guard display != record.displayID,
+                  let owner = records.first(where: { CFEqual($0.element, window) }) else { return false }
+            return owner.app.processIdentifier != record.app.processIdentifier
+        } : [:]
+        let remoteMinimized = preserveRemoteMinimized ? records.filter {
+            $0.app.processIdentifier == record.app.processIdentifier && $0.displayID != record.displayID && $0.minimized
+        }.map { $0.element } : []
+        if record.minimized { AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+        record.app.activate(options: [])
+        AXUIElementPerformAction(record.element, kAXRaiseAction as CFString)
+        func restoreRemoteFrontmost() {
+            let currentRecords = windows(previous: self.records)
+            let currentFrontmost = frontmostWindowsByDisplay(currentRecords)
+            for (display, previous) in remoteFrontmost {
+                guard let current = currentFrontmost[display], !CFEqual(current, previous),
+                      let owner = currentRecords.first(where: { CFEqual($0.element, current) }),
+                      owner.app.processIdentifier == record.app.processIdentifier,
+                      currentRecords.contains(where: { CFEqual($0.element, previous) && !$0.minimized }) else { continue }
+                AXUIElementPerformAction(previous, kAXRaiseAction as CFString)
+            }
+        }
+        if !remoteFrontmost.isEmpty {
+            restoreRemoteFrontmost()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { restoreRemoteFrontmost() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { restoreRemoteFrontmost() }
+        }
+        if !remoteMinimized.isEmpty {
+            func restoreMinimizedState() {
+                for window in remoteMinimized {
+                    let minimized: Bool = attribute(window, kAXMinimizedAttribute as CFString) ?? true
+                    if !minimized { AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }
+                }
+            }
+            restoreMinimizedState()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { restoreMinimizedState() }
+        }
+    }
+}
+final class WindowButton: NSButton { var record: WindowRecord? }
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.run()
