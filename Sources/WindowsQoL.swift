@@ -746,7 +746,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for record in local {
                 if let bundle = record.app.bundleIdentifier, !ids.contains(bundle) { ids.append(bundle) }
             }
-            var x: CGFloat = 8
+            let spotlight = TaskbarClickButton(frame: NSRect(x: 8, y: 3, width: 58, height: 66))
+            spotlight.bezelStyle = .regularSquare; spotlight.isBordered = false
+            spotlight.title = "\u{F8FF}"
+            spotlight.font = .systemFont(ofSize: 46)
+            spotlight.contentTintColor = .white
+            spotlight.toolTip = "Spotlight Search"
+            spotlight.target = self; spotlight.action = #selector(openSpotlight)
+            bar.addSubview(spotlight)
+            var x: CGFloat = 70
             for bundle in ids {
                 guard x + 58 <= screen.frame.width - 200 else { break }
                 let app = local.first { $0.app.bundleIdentifier == bundle }?.app
@@ -774,7 +782,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.onHover = { [weak self] button in self?.scheduleHover(button) }
                 button.contextMenu = { [weak self] in self?.appContextMenu(bundle: bundle, displayKey: key, isPrimary: isPrimary) ?? NSMenu() }
                 if localPins.contains(bundle) {
-                    let leftEdge = screen.frame.minX + 8
+                    let leftEdge = screen.frame.minX + 70
                     button.onReorder = { [weak self] screenX in self?.reorderPin(bundle, targetX: screenX - leftEdge, displayKey: key, isPrimary: isPrimary) }
                 }
                 bar.addSubview(button)
@@ -838,6 +846,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard size.height > 100, let value = AXValueCreate(.cgSize, &size) else { continue }
             AXUIElementSetAttributeValue(record.element, kAXSizeAttribute as CFString, value)
         }
+    }
+    @objc func openSpotlight() {
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false) else { return }
+        down.flags = .maskCommand; up.flags = .maskCommand
+        down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
     }
     @objc func launchUtility(_ sender: NSButton) {
         guard let bundle = sender.identifier?.rawValue, let screen = sender.window?.screen,
