@@ -4,7 +4,7 @@
 
 - After a new feature is confirmed working by Dan, commit it and push it to the configured remote. Do not claim a feature is confirmed merely because it compiles.
 - Preserve Dan's existing macOS settings and explain any system-wide changes or permissions. Avoid changing his system just to test a build.
-- This project is a native Swift/AppKit macOS menu-bar app, built with `./scripts/build.sh`; full Xcode is not required. The output is `build/Windows QoL.app` (ignored by Git). Test builds without replacing a running app where possible, and tell Dan to quit and reopen it after updates.
+- This project is a native Swift/AppKit macOS menu-bar app, built with `./scripts/build.sh`; full Xcode is not required. The output is `build/Windows QoL.app` (ignored by Git). After source changes, always compile and install the updated app at the normal build path before asking Dan to test it. A separate test build does not update the app he runs. Stop the running app normally before replacing its build where possible, then reopen it; normal shutdown may briefly show and restart the Dock. For later restarts, Dan can use the four-pane menu-bar icon → Reload Windows QoL, which quits and reopens the installed app but does not compile or install source changes.
 
 ## Accessibility and signing
 

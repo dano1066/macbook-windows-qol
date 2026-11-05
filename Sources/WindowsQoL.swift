@@ -78,7 +78,30 @@ class HoverButton: NSButton {
     override func mouseEntered(with event: NSEvent) { onHover?(self) }
 }
 
-final class AppIconButton: HoverButton {
+class TaskbarClickButton: HoverButton {
+    func showClickFeedback() {
+        wantsLayer = true
+        guard let layer = layer else { return }
+        let flash = CALayer()
+        flash.frame = layer.bounds.insetBy(dx: 3, dy: 3)
+        flash.cornerRadius = 10
+        flash.backgroundColor = NSColor.white.withAlphaComponent(0.30).cgColor
+        layer.addSublayer(flash)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { flash.removeFromSuperlayer() }
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 1.0; animation.toValue = 0.0; animation.duration = 0.45
+        flash.opacity = 0
+        flash.add(animation, forKey: "click")
+        CATransaction.commit()
+    }
+    override func mouseDown(with event: NSEvent) {
+        showClickFeedback()
+        super.mouseDown(with: event)
+    }
+}
+
+final class AppIconButton: TaskbarClickButton {
     var appIcon: NSImage?
     var windowCount = 0
     var hasVisibleWindow = false
@@ -95,7 +118,7 @@ final class AppIconButton: HoverButton {
             if next.type == .leftMouseDragged && abs(point.x - start.x) > 8 { dragging = true }
             if next.type == .leftMouseUp {
                 if dragging { onReorder?(point.x) }
-                else if bounds.contains(convert(next.locationInWindow, from: nil)) { performClick(nil) }
+                else if bounds.contains(convert(next.locationInWindow, from: nil)) { showClickFeedback(); performClick(nil) }
                 break
             }
         }
@@ -744,7 +767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for (index, bundle) in utilityIDs.enumerated() {
                 guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil else { continue }
                 let utilityX = max(0, screen.frame.width - 196 + CGFloat(index) * 48)
-                let button = NSButton(frame: NSRect(x: utilityX, y: 15, width: 44, height: 42))
+                let button = TaskbarClickButton(frame: NSRect(x: utilityX, y: 15, width: 44, height: 42))
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 button.toolTip = bundle == "com.apple.Terminal" ? "Terminal" : "System Settings"
                 button.image = NSImage(systemSymbolName: bundle == "com.apple.Terminal" ? "terminal" : "gearshape", accessibilityDescription: button.toolTip)
@@ -754,14 +777,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.target = self; button.action = #selector(launchUtility(_:))
                 bar.addSubview(button)
             }
-            let trash = NSButton(frame: NSRect(x: max(0, screen.frame.width - 100), y: 15, width: 44, height: 42))
+            let trash = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 100), y: 15, width: 44, height: 42))
             trash.bezelStyle = .regularSquare; trash.isBordered = false
             trash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Trash")
             trash.imagePosition = .imageOnly; trash.imageScaling = .scaleProportionallyDown
             trash.contentTintColor = .white; trash.toolTip = "Open Trash"
-            trash.target = self; trash.action = #selector(openTrash)
+            trash.target = self; trash.action = #selector(openTrash(_:))
             bar.addSubview(trash)
-            let dockButton = NSButton(frame: NSRect(x: max(0, screen.frame.width - 52), y: 15, width: 44, height: 42))
+            let dockButton = TaskbarClickButton(frame: NSRect(x: max(0, screen.frame.width - 52), y: 15, width: 44, height: 42))
             dockButton.bezelStyle = .regularSquare; dockButton.isBordered = false
             dockButton.image = NSImage(systemSymbolName: "dock.rectangle", accessibilityDescription: "Toggle Dock auto-hide")
             dockButton.contentTintColor = .white
@@ -795,7 +818,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc func launchUtility(_ sender: NSButton) {
-        guard let bundle = sender.identifier?.rawValue else { return }
+        guard let bundle = sender.identifier?.rawValue, let screen = sender.window?.screen,
+              let display = displayID(screen) else { return }
+        let previous = applicationWindows(bundle)
         if bundle == "com.apple.Terminal" {
             // With no target window, Terminal creates a new window. `cd` uses the
             // shell's home directory without touching existing Terminal sessions.
@@ -807,11 +832,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.informativeText = "Allow Windows QoL to control Terminal in System Settings → Privacy & Security → Automation, then try again.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
                 alert.runModal()
             }
+            if error == nil { placeOpenedWindow(bundle: bundle, previous: previous, on: display, allowExisting: false) }
             return
         }
-        guard
-              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
-        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+            guard error == nil else { return }
+            DispatchQueue.main.async { self?.placeOpenedWindow(bundle: bundle, previous: previous, on: display, allowExisting: true) }
+        }
     }
     func appContextMenu(bundle: String, displayKey: String, isPrimary: Bool) -> NSMenu {
         let menu = NSMenu()
@@ -845,11 +873,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isPrimary { pinned = items } else { var all = displayPins; all[displayKey] = items; displayPins = all }
         refresh()
     }
+    func applicationWindows(_ bundle: String) -> [AXUIElement] {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { return [] }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        return attribute(root, kAXWindowsAttribute as CFString) ?? []
+    }
+    func moveWindow(_ window: AXUIElement, to display: CGDirectDisplayID) {
+        guard let screen = NSScreen.screens.first(where: { displayID($0) == display }),
+              let rect = windowRect(window) else { return }
+        let bounds = CGDisplayBounds(display)
+        let topInset = screen.frame.maxY - screen.visibleFrame.maxY
+        let leftInset = screen.visibleFrame.minX - screen.frame.minX
+        let usableWidth = screen.visibleFrame.width
+        let usableHeight = max(0, bounds.height - topInset - taskbarHeight)
+        var point = CGPoint(x: bounds.minX + leftInset + max(0, (usableWidth - rect.width) / 2),
+                            y: bounds.minY + topInset + max(0, (usableHeight - rect.height) / 2))
+        if let value = AXValueCreate(.cgPoint, &point) {
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+        }
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+    func placeOpenedWindow(bundle: String, previous: [AXUIElement], on display: CGDirectDisplayID, allowExisting: Bool) {
+        var attempts = 0
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            attempts += 1
+            let current = self.applicationWindows(bundle)
+            let created = current.first { candidate in !previous.contains { CFEqual($0, candidate) } && windowRect(candidate) != nil }
+            var target = created
+            // Some apps reuse a window. Give newly created windows time to appear first.
+            if target == nil && allowExisting && !previous.isEmpty && attempts >= 15,
+               let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
+                let root = AXUIElementCreateApplication(app.processIdentifier)
+                target = attribute(root, kAXFocusedWindowAttribute as CFString)
+            }
+            if let target = target {
+                self.moveWindow(target, to: display)
+                timer.invalidate()
+            } else if attempts >= 100 { timer.invalidate() }
+        }
+    }
     func newFinderWindow(on screen: NSScreen) {
-        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
-              let display = displayID(screen) else { return }
-        let root = AXUIElementCreateApplication(finder.processIdentifier)
-        let previous: [AXUIElement] = attribute(root, kAXWindowsAttribute as CFString) ?? []
+        guard let display = displayID(screen) else { return }
+        let previous = applicationWindows("com.apple.finder")
         var error: NSDictionary?
         NSAppleScript(source: "tell application \"Finder\"\nactivate\nmake new Finder window\nend tell")?.executeAndReturnError(&error)
         if let error = error {
@@ -857,22 +923,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.informativeText = "Allow Windows QoL to control Finder in System Settings → Privacy & Security → Automation.\n\n\(error[NSAppleScript.errorMessage] as? String ?? "Unknown error")"
             alert.runModal(); return
         }
-        var attempts = 0
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            attempts += 1
-            let current: [AXUIElement] = attribute(root, kAXWindowsAttribute as CFString) ?? []
-            if let created = current.first(where: { newWindow in !previous.contains(where: { CFEqual($0, newWindow) }) }) {
-                let bounds = CGDisplayBounds(display)
-                let size = windowRect(created)?.size ?? CGSize(width: 700, height: 500)
-                var point = CGPoint(x: bounds.minX + max(0, (bounds.width - size.width) / 2), y: bounds.minY + max(30, (bounds.height - size.height) / 2))
-                if let value = AXValueCreate(.cgPoint, &point) { AXUIElementSetAttributeValue(created, kAXPositionAttribute as CFString, value) }
-                AXUIElementPerformAction(created, kAXRaiseAction as CFString)
-                timer.invalidate()
-            } else if attempts >= 20 { timer.invalidate() }
-        }
+        placeOpenedWindow(bundle: "com.apple.finder", previous: previous, on: display, allowExisting: false)
     }
-    @objc func openTrash() {
+    @objc func openTrash(_ sender: NSButton) {
+        guard let screen = sender.window?.screen, let display = displayID(screen) else { return }
+        let previous = applicationWindows("com.apple.finder")
         NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".Trash", isDirectory: true))
+        placeOpenedWindow(bundle: "com.apple.finder", previous: previous, on: display, allowExisting: true)
     }
     @objc func toggleDockAutoHide() {
         // System Events applies the global Dock preference without restarting Dock.
@@ -895,8 +952,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let record = matches.first { closeHover(); toggle(record) }
         else if bundle == "com.apple.finder" { closeHover(); newFinderWindow(on: screen) }
         else if records.contains(where: { $0.app.bundleIdentifier == bundle }) {
-            // Let the user explicitly choose a remote window instead of silently switching displays.
-            showWindows(records.filter { $0.app.bundleIdentifier == bundle }, anchoredTo: sender)
+            let remote = records.filter { $0.app.bundleIdentifier == bundle }
+            let primary = NSScreen.screens.first.flatMap(displayID) == id
+            let pins = primary ? pinned : (displayPins[displayPinKey(id)] ?? [])
+            if pins.contains(bundle), let record = remote.first(where: { isActive($0) }) ?? remote.first {
+                closeHover(); focus(record); moveWindow(record.element, to: id)
+            } else { showWindows(remote, anchoredTo: sender) }
         }
         else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) {
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first, app.isHidden {
@@ -910,7 +971,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     guard alert.runModal() == .alertFirstButtonReturn else { return }
                 }
             }
-            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+            let previous = applicationWindows(bundle)
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                guard error == nil else { return }
+                DispatchQueue.main.async { self?.placeOpenedWindow(bundle: bundle, previous: previous, on: id, allowExisting: true) }
+            }
         }
     }
     func scheduleHover(_ button: HoverButton) {
