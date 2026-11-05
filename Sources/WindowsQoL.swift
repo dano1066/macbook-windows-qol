@@ -1365,7 +1365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hoverPending = pending
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: pending)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: pending)
     }
     func closeHover() {
         hoverPending?.cancel(); hoverPending = nil
