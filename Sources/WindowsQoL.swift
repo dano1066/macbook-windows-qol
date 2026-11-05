@@ -886,7 +886,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let localItem = NSMenuItem(title: isPinnedHere ? "Unpin from this taskbar" : "Pin to this taskbar", action: #selector(togglePin(_:)), keyEquivalent: "")
             localItem.target = self; localItem.representedObject = ["bundle": bundle, "scope": displayKey]; menu.addItem(localItem)
         }
+        if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).contains(where: { !$0.isTerminated }) {
+            menu.addItem(.separator())
+            let quit = NSMenuItem(title: "Quit App", action: #selector(quitApplication(_:)), keyEquivalent: "")
+            quit.target = self; quit.representedObject = bundle; menu.addItem(quit)
+        }
         return menu
+    }
+    @objc func quitApplication(_ sender: NSMenuItem) {
+        guard let bundle = sender.representedObject as? String else { return }
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundle) where !app.isTerminated {
+            app.terminate()
+        }
     }
     @objc func togglePin(_ sender: NSMenuItem) {
         guard let context = sender.representedObject as? [String: String], let bundle = context["bundle"], let scope = context["scope"] else { return }
