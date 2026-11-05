@@ -1400,6 +1400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var cards: [WindowButton] = []
         for (index, record) in matches.enumerated() {
             let row = WindowButton(frame: NSRect(x: padding + CGFloat(index) * (cardWidth + gap), y: padding, width: cardWidth, height: cardHeight))
+            row.cell = PreviewButtonCell()
             let appName = record.app.localizedName ?? "Window"
             let windowTitle = record.title.isEmpty || record.title == appName ? appName : "\(appName) — \(record.title)"
             row.title = (record.minimized ? "◌  " : "") + windowTitle
@@ -1580,6 +1581,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 }
+final class PreviewButtonCell: NSButtonCell {
+    override func imageRect(forBounds rect: NSRect) -> NSRect {
+        NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height - 24)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        NSRect(x: rect.minX + 7, y: rect.maxY - 22, width: rect.width - 14, height: 18)
+    }
+}
+
 final class WindowButton: NSButton { var record: WindowRecord? }
 let app = NSApplication.shared
 let delegate = AppDelegate()
