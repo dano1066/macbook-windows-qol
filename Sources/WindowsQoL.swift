@@ -486,6 +486,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             task.waitUntilExit()
             return (task.terminationStatus, String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
         } catch { return (-1, "") }
+    var pendingPreviewCloses: [(WindowRecord, Date)] = []
+    var previewAnimating = false
     }
     func prepareDock() {
         let defaults = UserDefaults.standard
@@ -728,7 +730,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = "\(trusted)|\(pinned.joined(separator: ","))|\(displayPinState)|" + NSScreen.screens.map { "\(displayID($0) ?? 0):\($0.frame)" }.joined(separator: "|") + records.map { "\($0.app.processIdentifier):\($0.displayID):\($0.title):\($0.minimized):\(isActive($0))" }.sorted().joined(separator: "|")
         guard state != signature else { return }
         signature = state
-        closeHover()
         rebuildMenu()
         let primary = NSScreen.screens.first.flatMap(displayID)
         for screen in NSScreen.screens {
@@ -1141,3 +1142,76 @@ let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
+        pendingPreviewCloses.removeAll(); previewAnimating = false
+        scroll.autoresizingMask = [.width, .height]
+            let close = WindowButton(frame: NSRect(x: cardWidth - 30, y: 6, width: 24, height: 24))
+            close.record = record; close.target = self; close.action = #selector(closePreviewWindow(_:))
+            close.title = "×"; close.font = .systemFont(ofSize: 19, weight: .medium)
+            close.isBordered = false; close.contentTintColor = .white
+            close.wantsLayer = true; close.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.75).cgColor
+            close.layer?.cornerRadius = 12; close.toolTip = "Close window"
+            close.setAccessibilityLabel("Close \(row.title)")
+            close.isEnabled = (attribute(record.element, kAXCloseButtonAttribute as CFString) as AXUIElement?) != nil
+            row.addSubview(close)
+            self.checkPreviewCloses(in: panel)
+    @objc func closePreviewWindow(_ sender: WindowButton) {
+        guard let record = sender.record else { return }
+        let button: AXUIElement? = attribute(record.element, kAXCloseButtonAttribute as CFString)
+        guard let button = button, AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t close the window"
+            alert.informativeText = "The app did not accept the close request."
+            alert.runModal()
+            return
+        }
+        sender.isEnabled = false
+        pendingPreviewCloses.append((record, Date()))
+    }
+    func checkPreviewCloses(in panel: NSPanel) {
+        guard !previewAnimating, let scroll = panel.contentView as? NSScrollView,
+              let list = scroll.documentView else { return }
+        for (record, requested) in pendingPreviewCloses {
+            let root = AXUIElementCreateApplication(record.app.processIdentifier)
+            var value: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &value)
+            if result == .success, let open = value as? [AXUIElement],
+               !open.contains(where: { CFEqual($0, record.element) }) {
+                pendingPreviewCloses.removeAll { CFEqual($0.0.element, record.element) }
+                guard let card = list.subviews.compactMap({ $0 as? WindowButton }).first(where: {
+                    $0.record.map { CFEqual($0.element, record.element) } ?? false
+                }) else { return }
+                previewAnimating = true
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    card.animator().alphaValue = 0
+                } completionHandler: { [weak self, weak panel] in
+                    guard let self = self, let panel = panel, self.hoverPanel === panel else { return }
+                    card.removeFromSuperview()
+                    let remaining = list.subviews.compactMap { $0 as? WindowButton }.sorted { $0.frame.minX < $1.frame.minX }
+                    guard !remaining.isEmpty else { self.closeHover(); return }
+                    let contentWidth = CGFloat(remaining.count) * 184 - 8 + 24
+                    let width = min(contentWidth, max(1, (panel.screen?.visibleFrame.width ?? contentWidth) - 24))
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.18
+                        for (index, item) in remaining.enumerated() {
+                            item.animator().setFrameOrigin(NSPoint(x: 12 + CGFloat(index) * 184, y: item.frame.minY))
+                        }
+                        var frame = panel.frame; frame.size.width = width
+                        panel.animator().setFrame(frame, display: true)
+                    } completionHandler: {
+                        guard self.hoverPanel === panel else { return }
+                        list.setFrameSize(NSSize(width: contentWidth, height: list.frame.height))
+                        scroll.hasHorizontalScroller = contentWidth > width
+                        self.previewAnimating = false
+                    }
+                }
+                return
+            }
+            if Date().timeIntervalSince(requested) > 10 {
+                pendingPreviewCloses.removeAll { CFEqual($0.0.element, record.element) }
+                if let card = list.subviews.compactMap({ $0 as? WindowButton }).first(where: {
+                    $0.record.map { CFEqual($0.element, record.element) } ?? false
+                }) { (card.subviews.first as? NSButton)?.isEnabled = true }
+            }
+        }
+    }
