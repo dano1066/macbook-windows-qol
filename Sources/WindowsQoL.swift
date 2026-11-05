@@ -4,6 +4,7 @@ import ScreenCaptureKit
 import ServiceManagement
 
 let taskbarHeight: CGFloat = 72
+let taskbarWindowGap: CGFloat = 2
 
 // A small, extensible host for desktop features. The taskbar is the first feature.
 struct WindowRecord {
@@ -409,7 +410,7 @@ final class TitlebarZoom {
         let visible = screen.visibleFrame
         let topInset = screen.frame.maxY - visible.maxY
         let leftInset = visible.minX - screen.frame.minX
-        let bottomInset = max(taskbarHeight, visible.minY - screen.frame.minY)
+        let bottomInset = taskbarHeight + taskbarWindowGap
         let target = CGRect(x: display.minX + leftInset, y: display.minY + topInset,
                             width: visible.width, height: display.height - topInset - bottomInset)
         guard target.width > 100, target.height > 100 else { return }
@@ -1062,12 +1063,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let topInset = screen.frame.maxY - screen.visibleFrame.maxY
             let usableTop = display.minY + topInset
             let taskbarTop = display.maxY - taskbarHeight
+            let desiredBottom = taskbarTop - taskbarWindowGap
+            let visibleBottomInset = screen.visibleFrame.minY - screen.frame.minY
+            let alignedWithDockInset = visibleBottomInset > taskbarHeight + taskbarWindowGap + 1 &&
+                abs(rect.maxY - (display.maxY - visibleBottomInset)) <= 2
             guard abs(rect.minY - usableTop) <= 24,
-                  abs(rect.maxY - display.maxY) <= 24,
+                  (abs(rect.maxY - display.maxY) <= 24 || abs(rect.maxY - taskbarTop) <= 2 || alignedWithDockInset),
                   rect.height >= display.height * 0.70,
-                  rect.maxY > taskbarTop + 1,
+                  (rect.maxY > desiredBottom + 1 || alignedWithDockInset),
                   (attribute(record.element, "AXFullScreen" as CFString, as: Bool.self) ?? false) == false else { continue }
-            var size = CGSize(width: rect.width, height: taskbarTop - rect.minY)
+            var size = CGSize(width: rect.width, height: desiredBottom - rect.minY)
             guard size.height > 100, let value = AXValueCreate(.cgSize, &size) else { continue }
             AXUIElementSetAttributeValue(record.element, kAXSizeAttribute as CFString, value)
             clearanceAttempts.removeAll { CFEqual($0.element, record.element) }
