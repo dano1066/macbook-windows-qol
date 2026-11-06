@@ -1425,7 +1425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if running {
             menu.addItem(.separator())
-            if !applicationWindows(bundle).isEmpty {
+            if records.filter({ $0.displayID == display && $0.app.bundleIdentifier == bundle }).count > 1 {
                 let close = NSMenuItem(title: "Close All Windows", action: #selector(closeAllApplicationWindows(_:)), keyEquivalent: "")
                 close.target = self; close.representedObject = bundle; menu.addItem(close)
             }
