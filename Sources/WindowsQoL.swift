@@ -287,21 +287,26 @@ final class AppIconButton: TaskbarClickButton {
         } else {
             icon.draw(in: NSRect(x: 4, y: 5, width: 44, height: 44), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
+        let lineRect = NSRect(x: 15, y: 50, width: 22, height: 2)
         if windowCount > 0 {
-            (isFocused ? NSColor.systemCyan : (hasVisibleWindow ? NSColor.systemBlue : NSColor.systemBlue.withAlphaComponent(0.45))).setFill()
-            let lineHeight: CGFloat = hasVisibleWindow ? 3 : 2
-            NSBezierPath(roundedRect: NSRect(x: 8, y: bounds.height - lineHeight - 1, width: 36, height: lineHeight), xRadius: lineHeight / 2, yRadius: lineHeight / 2).fill()
+            NSGraphicsContext.saveGraphicsState()
+            let color = hasVisibleWindow && isFocused ? NSColor.systemBlue : NSColor.white
+            let glow = NSShadow(); glow.shadowColor = color.withAlphaComponent(0.45)
+            glow.shadowBlurRadius = 4; glow.shadowOffset = .zero; glow.set()
+            color.withAlphaComponent(hasVisibleWindow && isFocused ? 0.9 : 0.55).setFill()
+            let indicator = hasVisibleWindow ? lineRect : NSRect(x: 24.5, y: 49.5, width: 3, height: 3)
+            NSBezierPath(roundedRect: indicator, xRadius: indicator.height / 2, yRadius: indicator.height / 2).fill()
+            NSGraphicsContext.restoreGraphicsState()
         } else if !remoteDirections.isEmpty {
             let left = remoteDirections.contains(-1)
             let right = remoteDirections.contains(1)
             let center = remoteDirections.contains(0) || (left && right)
-            let clear = NSColor.systemBlue.withAlphaComponent(0.0)
-            let blue = NSColor.systemBlue
-            let colors = center ? [clear, blue, clear] : (left ? [blue, clear] : [clear, blue])
-            let rect = NSRect(x: 8, y: bounds.height - 4, width: 36, height: 3)
+            let clear = NSColor.white.withAlphaComponent(0)
+            let grey = NSColor.white.withAlphaComponent(0.65)
+            let colors = center ? [clear, grey, clear] : (left ? [grey, clear] : [clear, grey])
             NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5).addClip()
-            NSGradient(colors: colors)?.draw(in: rect, angle: 0)
+            NSBezierPath(roundedRect: lineRect, xRadius: 1, yRadius: 1).addClip()
+            NSGradient(colors: colors)?.draw(in: lineRect, angle: 0)
             NSGraphicsContext.restoreGraphicsState()
         }
         if let badge = badge, !badge.isEmpty {
