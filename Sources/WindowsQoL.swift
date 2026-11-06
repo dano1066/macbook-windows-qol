@@ -578,6 +578,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var panels: [CGDirectDisplayID: TaskbarPanel] = [:]
     var timer: Timer?
+    var monitorFocusTimer: Timer?
+    var pointerDisplay: CGDirectDisplayID?
+    var pendingPointerDisplay: CGDirectDisplayID?
     var records: [WindowRecord] = []
     // Retain only recent attempts for still-open windows. An unchanged frame
     // after a resize can mean the application ignored the request.
@@ -606,6 +609,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let dockBadges = DockBadges()
     var badges: [String: String] = [:]
     let shortcutsKey = "fnShortcutsEnabled"
+    let monitorFocusKey = "activateOnMonitorEntry"
+    var monitorFocusEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: monitorFocusKey) }
+        set { UserDefaults.standard.set(newValue, forKey: monitorFocusKey) }
+    }
     var shortcutsEnabled: Bool {
         get { UserDefaults.standard.object(forKey: shortcutsKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: shortcutsKey) }
@@ -645,6 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         refresh()
+        updateMonitorFocusTimer()
         timer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
     }
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -803,13 +812,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text("macOS may ask you to approve this in Login Items & Extensions.", y: 160)
         case 1:
             heading("Taskbar")
-            text("Pin your most recently used app to the primary taskbar, or right-click any taskbar icon to pin or unpin it.", y: 282, height: 56)
+            let focusToggle = NSButton(checkboxWithTitle: "Activate windows when moving between monitors", target: self, action: #selector(toggleMonitorFocus(_:)))
+            focusToggle.state = monitorFocusEnabled ? .on : .off
+            focusToggle.frame = NSRect(x: 30, y: 319, width: 450, height: 28); content.addSubview(focusToggle)
+            text("Moving to another display can change keyboard focus. Requires Accessibility access.", y: 275, height: 42)
+            text("Pin your most recently used app to the primary taskbar, or right-click any taskbar icon to pin or unpin it.", y: 211, height: 56)
             let name = lastExternalApplication?.localizedName ?? "No app selected"
-            text("Last used app: \(name)", y: 250, height: 22)
-            let pin = button("Pin last used app", y: 204, action: #selector(pinFrontmost), width: 175)
+            text("Last used app: \(name)", y: 183, height: 22)
+            let pin = button("Pin last used app", y: 145, action: #selector(pinFrontmost), width: 175)
             pin.isEnabled = lastExternalApplication?.bundleIdentifier != nil
-            text("Restore the default pinned apps and clear pins on other displays.", y: 146)
-            _ = button("Reset pinned apps", y: 101, action: #selector(resetPins), width: 175)
+            text("Restore the default pinned apps and clear pins on other displays.", y: 95)
+            _ = button("Reset pinned apps", y: 53, action: #selector(resetPins), width: 175)
         case 2:
             heading("Shortcuts")
             let toggle = NSButton(checkboxWithTitle: "Enable Windows-style Fn shortcuts", target: self, action: #selector(toggleShortcuts))
@@ -883,6 +896,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if shortcutsEnabled && AXIsProcessTrusted() { _ = shortcuts.start() } else { shortcuts.stop() }
         updatePermissionStatuses(); rebuildMenu()
     }
+    @objc func toggleMonitorFocus(_ sender: NSButton) {
+        monitorFocusEnabled = sender.state == .on
+        updateMonitorFocusTimer()
+    }
+    func updateMonitorFocusTimer() {
+        monitorFocusTimer?.invalidate(); monitorFocusTimer = nil
+        pointerDisplay = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }.flatMap(displayID)
+        pendingPointerDisplay = nil
+        guard monitorFocusEnabled else { return }
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.checkMonitorEntry() }
+        RunLoop.main.add(timer, forMode: .common)
+        monitorFocusTimer = timer
+    }
+    func checkMonitorEntry() {
+        let point = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }), let id = displayID(screen) else {
+            pointerDisplay = nil; pendingPointerDisplay = nil; return
+        }
+        if pointerDisplay != id { pointerDisplay = id; pendingPointerDisplay = id }
+        guard pendingPointerDisplay == id else { return }
+        // Never activate during a drag or while our settings window is active.
+        guard NSEvent.pressedMouseButtons == 0, !NSApp.isActive, AXIsProcessTrusted() else {
+            pendingPointerDisplay = nil; return
+        }
+        // Wait until the pointer reaches the usable window area if it entered
+        // through a menu bar or taskbar; don't activate the desktop or a panel.
+        guard screen.visibleFrame.contains(point), point.y >= screen.frame.minY + taskbarHeight else { return }
+        pendingPointerDisplay = nil
+        guard let primary = NSScreen.screens.first else { return }
+        let quartzPoint = CGPoint(x: point.x, y: primary.frame.maxY - point.y)
+        guard let listed = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
+        // The first normal window under the pointer is the only safe candidate.
+        guard let info = listed.first(where: { info in
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return false }
+            return rect.contains(quartzPoint)
+        }), let pid = info[kCGWindowOwnerPID as String] as? Int,
+              let bounds = info[kCGWindowBounds as String] as? [String: Any],
+              let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return }
+        let current = windows(previous: records)
+        let matches = current.filter { record in
+            guard record.app.processIdentifier == pid_t(pid), !record.minimized, let frame = record.frame else { return false }
+            return abs(frame.minX - rect.minX) + abs(frame.minY - rect.minY) + abs(frame.width - rect.width) + abs(frame.height - rect.height) < 12
+        }
+        guard matches.count == 1, let record = matches.first, !isActive(record) else { return }
+        focus(record, preserveRemoteMinimized: true)
+    }
     @objc func reloadApp() {
         let helper = Process()
         helper.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -912,7 +973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.removeObject(forKey: displayPinsKey)
         signature = ""; refresh()
     }
-    @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; refresh() }
+    @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; updateMonitorFocusTimer(); refresh() }
     @objc func refresh() {
         guard !reorderingPins else { return }
         if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
