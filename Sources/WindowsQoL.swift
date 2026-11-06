@@ -621,10 +621,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var panels: [CGDirectDisplayID: TaskbarPanel] = [:]
     var timer: Timer?
-    private var secureInputTimer: Timer?
-    private var secureInputActive = false
-    private var lastSecureInputNotice = Date.distantPast
     private var secureInputNotice: NSPanel?
+    private var secureFnTimer: Timer?
+    private var secureFnWasDown = false
     private let centeredTaskbarKey = "centeredTaskbar"
     private let taskbarSpacingKey = "centeredTaskbarSpacing"
     private var centeredTaskbar: Bool { UserDefaults.standard.bool(forKey: centeredTaskbarKey) }
@@ -709,10 +708,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         refresh()
         updateMonitorFocusTimer()
-        let secureTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.checkSecureInput() }
-        RunLoop.main.add(secureTimer, forMode: .common)
-        secureInputTimer = secureTimer
-        checkSecureInput()
+        let fnTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.checkSecureFn() }
+        RunLoop.main.add(fnTimer, forMode: .common)
+        secureFnTimer = fnTimer
         timer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
     }
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -772,7 +770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: startupDockRequest)
     }
     func applicationWillTerminate(_ notification: Notification) {
-        secureInputTimer?.invalidate(); secureInputNotice?.close()
+        secureFnTimer?.invalidate(); secureInputNotice?.close()
         startupDockRequest?.cancel()
         shortcuts.stop()
         titlebarZoom.stop()
@@ -1079,11 +1077,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.removeObject(forKey: displayPinsKey)
         signature = ""; refresh()
     }
-    private func checkSecureInput() {
-        let active = shortcutsEnabled && shortcuts.isRunning && IsSecureEventInputEnabled()
-        defer { secureInputActive = active }
-        guard active && !secureInputActive, Date().timeIntervalSince(lastSecureInputNotice) >= 30 else { return }
-        lastSecureInputNotice = Date()
+    private func checkSecureFn() {
+        let fnDown = CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
+        defer { secureFnWasDown = fnDown }
+        guard fnDown && !secureFnWasDown && shortcutsEnabled && shortcuts.isRunning,
+              IsSecureEventInputEnabled() else { return }
         showSecureInputNotice()
     }
     private func showSecureInputNotice() {
