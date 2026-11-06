@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 import ScreenCaptureKit
 import ServiceManagement
 
@@ -620,6 +621,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var panels: [CGDirectDisplayID: TaskbarPanel] = [:]
     var timer: Timer?
+    private var secureInputTimer: Timer?
+    private var secureInputActive = false
+    private var lastSecureInputNotice = Date.distantPast
+    private var secureInputNotice: NSPanel?
     private let centeredTaskbarKey = "centeredTaskbar"
     private let taskbarSpacingKey = "centeredTaskbarSpacing"
     private var centeredTaskbar: Bool { UserDefaults.standard.bool(forKey: centeredTaskbarKey) }
@@ -704,6 +709,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(displaysChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         refresh()
         updateMonitorFocusTimer()
+        let secureTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.checkSecureInput() }
+        RunLoop.main.add(secureTimer, forMode: .common)
+        secureInputTimer = secureTimer
+        checkSecureInput()
         timer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
     }
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -763,6 +772,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: startupDockRequest)
     }
     func applicationWillTerminate(_ notification: Notification) {
+        secureInputTimer?.invalidate(); secureInputNotice?.close()
         startupDockRequest?.cancel()
         shortcuts.stop()
         titlebarZoom.stop()
@@ -1068,6 +1078,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.removeObject(forKey: pinnedKey)
         UserDefaults.standard.removeObject(forKey: displayPinsKey)
         signature = ""; refresh()
+    }
+    private func checkSecureInput() {
+        let active = shortcutsEnabled && shortcuts.isRunning && IsSecureEventInputEnabled()
+        defer { secureInputActive = active }
+        guard active && !secureInputActive, Date().timeIntervalSince(lastSecureInputNotice) >= 30 else { return }
+        lastSecureInputNotice = Date()
+        showSecureInputNotice()
+    }
+    private func showSecureInputNotice() {
+        secureInputNotice?.close()
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return }
+        let width: CGFloat = 330, height: CGFloat = 70
+        let panel = NSPanel(contentRect: NSRect(x: visible.midX - width / 2, y: visible.maxY - height - 18, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.ignoresMouseEvents = true
+        let background = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        background.material = .hudWindow
+        background.blendingMode = .behindWindow
+        background.state = .active
+        background.wantsLayer = true
+        background.layer?.cornerRadius = 10
+        background.layer?.masksToBounds = true
+        let title = NSTextField(labelWithString: "Secure Input is active")
+        title.font = .boldSystemFont(ofSize: 13)
+        title.frame = NSRect(x: 15, y: 42, width: width - 30, height: 18)
+        let message = NSTextField(wrappingLabelWithString: "Fn shortcuts may not work here. Use Command-V to paste.")
+        message.font = .systemFont(ofSize: 12)
+        message.frame = NSRect(x: 15, y: 9, width: width - 30, height: 30)
+        background.addSubview(title); background.addSubview(message)
+        panel.contentView = background
+        secureInputNotice = panel
+        panel.orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self, weak panel] in
+            panel?.close()
+            if self?.secureInputNotice === panel { self?.secureInputNotice = nil }
+        }
     }
     @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; updateMonitorFocusTimer(); refresh() }
     @objc func refresh() {
