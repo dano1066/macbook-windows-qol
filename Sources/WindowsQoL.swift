@@ -581,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var monitorFocusTimer: Timer?
     var pointerDisplay: CGDirectDisplayID?
     var pendingPointerDisplay: CGDirectDisplayID?
+    var pendingMonitorWindow: WindowRecord?
     var records: [WindowRecord] = []
     // Retain only recent attempts for still-open windows. An unchanged frame
     // after a resize can mean the application ignored the request.
@@ -904,6 +905,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitorFocusTimer?.invalidate(); monitorFocusTimer = nil
         pointerDisplay = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }.flatMap(displayID)
         pendingPointerDisplay = nil
+        pendingMonitorWindow = nil
         guard monitorFocusEnabled else { return }
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.checkMonitorEntry() }
         RunLoop.main.add(timer, forMode: .common)
@@ -912,22 +914,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func checkMonitorEntry() {
         let point = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }), let id = displayID(screen) else {
-            pointerDisplay = nil; pendingPointerDisplay = nil; return
+            pointerDisplay = nil; pendingPointerDisplay = nil; pendingMonitorWindow = nil; return
         }
-        if pointerDisplay != id { pointerDisplay = id; pendingPointerDisplay = id }
+        if pointerDisplay != id {
+            pointerDisplay = id; pendingPointerDisplay = id; pendingMonitorWindow = nil
+        }
         guard pendingPointerDisplay == id else { return }
         // Never activate during a drag or while our settings window is active.
         guard NSEvent.pressedMouseButtons == 0, !NSApp.isActive, AXIsProcessTrusted() else {
-            pendingPointerDisplay = nil; return
+            pendingPointerDisplay = nil; pendingMonitorWindow = nil; return
         }
         // Wait until the pointer reaches the usable window area if it entered
         // through a menu bar or taskbar; don't activate the desktop or a panel.
         guard screen.visibleFrame.contains(point), point.y >= screen.frame.minY + taskbarHeight else { return }
-        pendingPointerDisplay = nil
         guard let primary = NSScreen.screens.first else { return }
         let quartzPoint = CGPoint(x: point.x, y: primary.frame.maxY - point.y)
+        if pendingMonitorWindow == nil {
+            let current = windows(previous: records)
+            guard let frontmost = frontmostWindowsByDisplay(current, useCachedFrames: true)[id],
+                  let record = current.first(where: { CFEqual($0.element, frontmost) }),
+                  record.frame != nil else {
+                pendingPointerDisplay = nil; return
+            }
+            pendingMonitorWindow = record
+        }
+        // Crossing over an exposed background window must not raise it. Keep
+        // waiting until the pointer reaches the display's frontmost window.
+        guard let target = pendingMonitorWindow, let targetFrame = target.frame,
+              targetFrame.contains(quartzPoint) else { return }
+        pendingPointerDisplay = nil; pendingMonitorWindow = nil
+        let current = windows(previous: records)
+        guard let frontmost = frontmostWindowsByDisplay(current, useCachedFrames: true)[id],
+              CFEqual(frontmost, target.element),
+              let record = current.first(where: { CFEqual($0.element, frontmost) }),
+              let frame = record.frame, frame.contains(quartzPoint) else { return }
         guard let listed = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
-        // The first normal window under the pointer is the only safe candidate.
+        // Verify that no other normal window is above the target at this point.
         guard let info = listed.first(where: { info in
             guard (info[kCGWindowLayer as String] as? Int) == 0,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
@@ -936,12 +958,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }), let pid = info[kCGWindowOwnerPID as String] as? Int,
               let bounds = info[kCGWindowBounds as String] as? [String: Any],
               let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return }
-        let current = windows(previous: records)
-        let matches = current.filter { record in
-            guard record.app.processIdentifier == pid_t(pid), !record.minimized, let frame = record.frame else { return false }
-            return abs(frame.minX - rect.minX) + abs(frame.minY - rect.minY) + abs(frame.width - rect.width) + abs(frame.height - rect.height) < 12
-        }
-        guard matches.count == 1, let record = matches.first, !isActive(record) else { return }
+        guard record.app.processIdentifier == pid_t(pid),
+              abs(frame.minX - rect.minX) + abs(frame.minY - rect.minY) + abs(frame.width - rect.width) + abs(frame.height - rect.height) < 12,
+              !isActive(record) else { return }
         focus(record, preserveRemoteMinimized: true)
     }
     @objc func reloadApp() {
