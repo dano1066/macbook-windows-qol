@@ -351,8 +351,15 @@ final class DockBadges {
         for (bundle, tile) in tiles {
             var value: CFTypeRef?
             let result = AXUIElementCopyAttributeValue(tile, "AXStatusLabel" as CFString, &value)
-            if result == .success, let label = value as? String, !label.isEmpty { badges[bundle] = label }
-            else if result != .success && result != .noValue && result != .attributeUnsupported { stale = true }
+            if result == .success, let label = value as? String {
+                // Some apps use a dot for unread activity even after their numbered
+                // notifications are cleared. Only display meaningful badge text.
+                let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+                let dots = CharacterSet(charactersIn: ".•●·∙‧")
+                if !trimmed.isEmpty && trimmed.unicodeScalars.contains(where: { !dots.contains($0) }) {
+                    badges[bundle] = trimmed
+                }
+            } else if result != .success && result != .noValue && result != .attributeUnsupported { stale = true }
         }
         if stale { lastScan = .distantPast }
         return badges
