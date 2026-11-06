@@ -613,6 +613,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var panels: [CGDirectDisplayID: TaskbarPanel] = [:]
     var timer: Timer?
+    private let centeredTaskbarKey = "centeredTaskbar"
+    private let taskbarSpacingKey = "centeredTaskbarSpacing"
+    private var centeredTaskbar: Bool { UserDefaults.standard.bool(forKey: centeredTaskbarKey) }
+    private var taskbarSpacing: Double {
+        let saved = UserDefaults.standard.object(forKey: taskbarSpacingKey) as? Double ?? 24
+        return min(80, max(2, saved))
+    }
     var monitorFocusTimer: Timer?
     var pointerDisplay: CGDirectDisplayID?
     var pendingPointerDisplay: CGDirectDisplayID?
@@ -797,21 +804,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 710, height: 420), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 710, height: 540), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Windows QoL Settings"; window.isReleasedWhenClosed = false
-        let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 190, height: 420))
+        let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 190, height: 540))
         sidebar.material = .sidebar; sidebar.blendingMode = .behindWindow; sidebar.state = .active
         let categories = [("General", "gearshape"), ("Taskbar", "rectangle.bottomthird.inset.filled"), ("Shortcuts", "keyboard"), ("Permissions", "lock.shield")]
         sidebarButtons = []
         for (index, category) in categories.enumerated() {
             let button = NSButton(title: category.0, target: self, action: #selector(selectSettingsCategory(_:)))
-            button.frame = NSRect(x: 12, y: 354 - CGFloat(index) * 39, width: 166, height: 32)
+            button.frame = NSRect(x: 12, y: 474 - CGFloat(index) * 39, width: 166, height: 32)
             button.tag = index; button.bezelStyle = .regularSquare; button.isBordered = false; button.alignment = .left
             button.image = NSImage(systemSymbolName: category.1, accessibilityDescription: nil); button.imagePosition = .imageLeading
             button.imageHugsTitle = false; button.wantsLayer = true; button.layer?.cornerRadius = 6
             sidebar.addSubview(button); sidebarButtons.append(button)
         }
-        let content = NSView(frame: NSRect(x: 190, y: 0, width: 520, height: 420))
+        let content = NSView(frame: NSRect(x: 190, y: 0, width: 520, height: 540))
         window.contentView?.addSubview(sidebar); window.contentView?.addSubview(content)
         settingsContent = content; permissionsWindow = window
         displaySettingsCategory(0)
@@ -848,17 +855,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text("macOS may ask you to approve this in Login Items & Extensions.", y: 160)
         case 1:
             heading("Taskbar")
+            let layoutLabel = NSTextField(labelWithString: "Taskbar layout")
+            layoutLabel.frame = NSRect(x: 30, y: 326, width: 150, height: 22); content.addSubview(layoutLabel)
+            let layout = NSPopUpButton(frame: NSRect(x: 190, y: 321, width: 260, height: 28), pullsDown: false)
+            layout.addItems(withTitles: ["Standard (left aligned)", "Centered"])
+            layout.selectItem(at: centeredTaskbar ? 1 : 0)
+            layout.target = self; layout.action = #selector(changeTaskbarLayout(_:)); content.addSubview(layout)
+            let spacingLabel = NSTextField(labelWithString: "Preferred icon spacing")
+            spacingLabel.frame = NSRect(x: 30, y: 287, width: 160, height: 22); content.addSubview(spacingLabel)
+            let spacing = NSSlider(value: taskbarSpacing, minValue: 2, maxValue: 80, target: self, action: #selector(changeTaskbarSpacing(_:)))
+            spacing.frame = NSRect(x: 190, y: 284, width: 220, height: 24); spacing.isEnabled = centeredTaskbar
+            spacing.toolTip = "Preferred gap between icons; spacing shrinks automatically when needed."
+            content.addSubview(spacing)
+            let spacingValue = NSTextField(labelWithString: "\(Int(taskbarSpacing.rounded())) pt")
+            spacingValue.frame = NSRect(x: 420, y: 287, width: 60, height: 22); spacingValue.tag = 817
+            spacingValue.textColor = .secondaryLabelColor; content.addSubview(spacingValue)
+            text("Spacing adjusts automatically to fit the available space.", y: 258, height: 22)
             let focusToggle = NSButton(checkboxWithTitle: "Activate windows when moving between monitors", target: self, action: #selector(toggleMonitorFocus(_:)))
             focusToggle.state = monitorFocusEnabled ? .on : .off
-            focusToggle.frame = NSRect(x: 30, y: 319, width: 450, height: 28); content.addSubview(focusToggle)
-            text("Moving to another display can change keyboard focus. Requires Accessibility access.", y: 275, height: 42)
-            text("Pin your most recently used app to the primary taskbar, or right-click any taskbar icon to pin or unpin it.", y: 211, height: 56)
+            focusToggle.frame = NSRect(x: 30, y: 222, width: 450, height: 28); content.addSubview(focusToggle)
+            text("Moving to another display can change keyboard focus. Requires Accessibility access.", y: 181, height: 38)
+            text("Pin your most recently used app to the primary taskbar, or right-click an icon to pin or unpin it.", y: 133, height: 38)
             let name = lastExternalApplication?.localizedName ?? "No app selected"
-            text("Last used app: \(name)", y: 183, height: 22)
-            let pin = button("Pin last used app", y: 145, action: #selector(pinFrontmost), width: 175)
+            text("Last used app: \(name)", y: 107, height: 22)
+            let pin = button("Pin last used app", y: 70, action: #selector(pinFrontmost), width: 175)
             pin.isEnabled = lastExternalApplication?.bundleIdentifier != nil
-            text("Restore the default pinned apps and clear pins on other displays.", y: 95)
-            _ = button("Reset pinned apps", y: 53, action: #selector(resetPins), width: 175)
+            let reset = NSButton(title: "Reset pinned apps", target: self, action: #selector(resetPins))
+            reset.bezelStyle = .rounded; reset.frame = NSRect(x: 210, y: 70, width: 175, height: 32); content.addSubview(reset)
+            reset.toolTip = "Restore default pins and clear pins on other displays."
         case 2:
             heading("Shortcuts")
             let toggle = NSButton(checkboxWithTitle: "Enable Windows-style Fn shortcuts", target: self, action: #selector(toggleShortcuts))
@@ -878,7 +902,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screenCaptureStatus = capture; _ = button("Enable Screen Capture…", y: 74, action: #selector(requestScreenCaptureFromSettings), width: 210)
             text("macOS manages permissions; changes may require reopening the app.", y: 22)
         }
+        for view in content.subviews { view.setFrameOrigin(NSPoint(x: view.frame.minX, y: view.frame.minY + 120)) }
         updatePermissionStatuses()
+    }
+    @objc private func changeTaskbarLayout(_ sender: NSPopUpButton) {
+        UserDefaults.standard.set(sender.indexOfSelectedItem == 1, forKey: centeredTaskbarKey)
+        signature = ""; refresh(); displaySettingsCategory(1)
+    }
+    @objc private func changeTaskbarSpacing(_ sender: NSSlider) {
+        let value = sender.doubleValue.rounded()
+        UserDefaults.standard.set(value, forKey: taskbarSpacingKey)
+        (settingsContent?.viewWithTag(817) as? NSTextField)?.stringValue = "\(Int(value)) pt"
+        signature = ""; refresh()
     }
     func updatePermissionStatuses() {
         shortcutStatusLabel?.stringValue = shortcutsEnabled ? (shortcuts.isRunning ? "Status: Active" : "Status: Unavailable — check Accessibility permission") : "Status: Off"
@@ -1077,12 +1112,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             spotlight.toolTip = "Spotlight Search"
             spotlight.target = self; spotlight.action = #selector(openSpotlight)
             bar.addSubview(spotlight)
-            var x: CGFloat = 62
-            for bundle in ids {
+            let availableApps = ids.compactMap { bundle -> (String, URL)? in
+                let app = local.first { $0.app.bundleIdentifier == bundle }?.app
+                guard let url = app?.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return nil }
+                return (bundle, url)
+            }
+            let leftEdge: CGFloat = 62
+            let rightEdge = max(leftEdge, screen.frame.width - 216)
+            let capacity = max(0, Int((rightEdge - leftEdge) / 52))
+            let visibleApps = centeredTaskbar ? Array(availableApps.prefix(capacity)) : availableApps
+            let count = visibleApps.count
+            let gap: CGFloat
+            var x: CGFloat
+            if centeredTaskbar {
+                let fitGap = count > 1 ? max(0, (rightEdge - leftEdge - CGFloat(count) * 52) / CGFloat(count - 1)) : 0
+                gap = min(CGFloat(taskbarSpacing), fitGap)
+                let groupWidth = CGFloat(count) * 52 + CGFloat(max(0, count - 1)) * gap
+                x = min(max((screen.frame.width - groupWidth) / 2, leftEdge), rightEdge - groupWidth)
+            } else {
+                gap = 2
+                x = leftEdge
+            }
+            for (bundle, appURL) in visibleApps {
                 guard x + 52 <= screen.frame.width - 216 else { break }
                 let app = local.first { $0.app.bundleIdentifier == bundle }?.app
-                let url = app?.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle)
-                guard let appURL = url else { continue }
                 let button = AppIconButton(frame: NSRect(x: x, y: 2, width: 52, height: 56))
                 button.bezelStyle = .regularSquare; button.isBordered = false
                 button.title = ""
@@ -1111,7 +1164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return self.appContextMenu(bundle: bundle, displayKey: key, isPrimary: isPrimary, display: id)
                 }
                 bar.addSubview(button)
-                x += 54
+                x += 52 + gap
             }
             let reorder = PinReorderInteraction(bar: bar, pins: localPins, begin: { [weak self] in
                 self?.reorderingPins = true
