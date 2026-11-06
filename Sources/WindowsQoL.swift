@@ -316,7 +316,7 @@ final class AppIconButton: TaskbarClickButton {
             let size = text.size(withAttributes: attributes)
             let width = min(bounds.width - 4, max(18, size.width + 8))
             let rect = NSRect(x: bounds.width - width - 1, y: 2, width: width, height: 18)
-            NSColor.systemRed.setFill()
+            NSColor(srgbRed: 0.82, green: 0.0, blue: 0.08, alpha: 1).setFill()
             NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9).fill()
             NSGraphicsContext.saveGraphicsState()
             rect.insetBy(dx: 2, dy: 0).clip()
