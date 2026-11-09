@@ -1,39 +1,169 @@
 # Windows QoL for macOS
 
-A native Mac utility for bringing familiar Windows-style desktop features to macOS. Its first feature is a taskbar on each connected display.
+Windows-style desktop conveniences, built as a native Swift and AppKit menu-bar app. Get a taskbar on every display, switch between windows with previews, and keep familiar shortcuts close at hand.
 
-## First version
+![Illustration of two displays with separate taskbars and windows arranged above them.](docs/images/taskbar-overview.svg)
 
-- The primary display has pinned apps (Finder and Safari to start) plus apps with windows on that display.
-- Other displays show their own pinned apps and apps with windows on that display. Moving a window updates the bars, usually within a second.
-- Windows that fill almost the full height of a display are resized above its taskbar after a drag or maximize. This uses Accessibility and is a best-effort adjustment: full-screen Spaces, apps that do not allow resizing, and windows that do not match the full-height layout may still overlap the bar.
-- Double-click a window title bar to fill the usable display above the taskbar; double-click again to restore its previous frame. If a window was already maximized before the app saw it, the first restore uses a centered smaller size. This includes Finder and requires Accessibility access; apps with custom title bars may not expose a compatible target.
-- Apps with multiple windows on a display show a stacked icon. Hover or click it to open a horizontal window chooser, then click the preview of the window to focus or restore. Previews use Screen Recording permission when available; minimized or unavailable windows use the app icon. A single-window icon minimizes its focused window or restores and focuses it. A blue line means the app has windows on this display: a bold line means at least one is visible, a dim, thin line means all are minimized, and a brighter line marks the focused app. Restoring a window returns it to its previous size rather than maximizing it to fill the screen.
-- Pinned apps remain on their taskbar even without local windows (and then have no blue line). Right-click an app icon to pin or unpin it: secondary taskbars offer both the primary and current taskbar, while the primary taskbar offers only the primary option. Drag pinned icons to reorder them on that taskbar. Secondary pins are stored by display identifier and are separate from the primary taskbar's pins. Clicking Finder with no local window creates a Finder window and attempts to place it on that display. For other pinned apps with windows only on other displays, the chooser lets you explicitly select a remote window rather than switching displays immediately; behavior can vary by app.
-- To pin an app, right-click its taskbar icon or bring it to the front and use **Settings… → Taskbar → Pin last used app**. Resetting pins restores the defaults.
-- Terminal, System Settings and Trash have simple quick-launch icons on the right side of every taskbar. The Terminal shortcut creates a new Terminal window in the home directory every time and may require Automation permission. Trash opens in Finder; open Terminal and System Settings windows appear with other running apps on the left.
-- **Settings… → Shortcuts** controls the Windows-style Fn shortcuts: Fn-C/V/X copy, paste and cut; Fn-A selects all; Fn-Z/Y undo and redo; Fn-F finds; Fn-E opens a new Finder window; Fn-S copies the display under the pointer to the clipboard; and Fn-Shift-S starts an area screenshot copied to the clipboard. These use Accessibility; screenshots and opening Finder may also require Screen Recording and Automation permissions. Fn-C and Fn-A replace macOS's Control Centre and Dock shortcuts while enabled. macOS, secure input fields, applications or particular keyboards may intercept shortcuts before the app receives them.
-- The button at the far right of each taskbar toggles the Apple Dock's **automatically hide and show** setting without restarting the Dock. macOS may ask for permission to control System Events the first time you use it. This is a system-wide setting, not a separate Dock for each monitor. When auto-hide is on, moving the pointer to the Dock's edge can still reveal it; clicking the button again makes it always visible. The setting remains in effect after quitting this app.
+*Illustrated overview, not an app screenshot.*
 
-On startup, the app hides the Dock and sets its edge reveal delay to 1,000 seconds, so accidental edge reveals are unlikely. On a normal quit, it restores the previous delay and shows the Dock; the Dock briefly restarts. If the app crashes or is force-quit, that cleanup cannot run; relaunch and quit normally to restore it. If needed, `defaults write com.apple.dock autohide -bool false && killall Dock` makes the Dock visible immediately. **Reload Windows QoL** in the Windows QoL menu-bar menu quits and reopens the app, so the Dock briefly reappears before it is hidden again.
+**Early prototype · Build from source · macOS**
 
-The bundled Finder extension adds **Open Terminal Here** to the context menu when right-clicking empty space in a folder or a single folder itself. After opening the app, enable the Finder extension under System Settings → General → Login Items & Extensions → Finder if needed. It may not appear in every location, such as virtual or cloud-provider folders. Finder may need to be restarted after updating the extension.
+[Features](#features) · [Get started](#get-started) · [Permissions](#permissions) · [Shortcuts](#shortcuts) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations)
 
-## Build and run
+## Features
 
-Requires macOS and Apple's Command Line Tools (`xcode-select --install`); full Xcode is not required.
+### A taskbar on every display
+
+Each taskbar shows the apps with windows on that display. Move a window between monitors and its taskbar entry follows, usually within a second.
+
+- **Separate pins per display.** Keep different apps on each monitor. Right-click an app to pin or unpin it, then drag pinned icons to reorder them.
+- **Standard or centered layout.** Choose left-aligned icons or a centered group, with adjustable spacing that contracts when space is limited.
+- **Window indicators and badges.** A line marks visible local windows, a dot marks minimized-only windows, and blue highlights the frontmost local window. The taskbar also mirrors meaningful notification badge text exposed by the native Dock.
+- **Quick access.** Open Spotlight, Finder, a new Terminal window, System Settings or Trash. Finder and Terminal also offer shortcuts to Desktop, Downloads, Documents and Home from their context menus.
+- **Optional focus across monitors.** Enable “Activate windows when moving between monitors” to focus the frontmost window when the pointer enters another display's window area.
+
+To pin an app from settings, bring it to the front, then choose **Settings… → Taskbar → Pin last used app**. Secondary taskbars offer both primary-taskbar and current-taskbar pin options in their context menus.
+
+### Switch windows, not just apps
+
+An app with multiple local windows gets a stacked icon. Hover over or click it to open a horizontal preview chooser, then select the window you want. Each preview also has a close button.
+
+| Action | Behavior |
+| --- | --- |
+| Click an icon with one local window | Minimize it if it is the frontmost window on that display; otherwise restore or focus it. |
+| Hover over an icon with local windows | Open the window preview chooser. |
+| Click an icon with multiple local windows | Open the chooser without minimizing a window. |
+| Right-click a running app | Manage pins, open a new window when the app exposes that action, or quit the app. Stacked apps also offer **Close All Windows**, which applies across displays. |
+| Click a pinned app with windows only on another display | Focus an existing window on that display. |
+
+Real window thumbnails require screen-capture permission and macOS 14 or later. When a suitable capture is unavailable, previews use the app icon instead.
+
+### Make room above the taskbar
+
+Windows that span almost the full display height are shortened to sit above the taskbar after you finish dragging or resizing them. Double-click an unmodified title bar to animate a window into a taskbar-aware maximized frame; double-click again to restore its previous frame.
+
+If no previous frame is available, restore uses a centered, smaller frame. This is a best-effort Accessibility feature: full-screen Spaces, interactive title-bar controls and apps that refuse resizing are excluded.
+
+### Open Terminal from Finder
+
+The bundled Finder extension adds **Open Terminal Here** when you right-click empty space in a folder or a single selected folder.
+
+Enable it under **System Settings → General → Login Items & Extensions → Finder** if needed. The location and wording vary with macOS. Virtual folders and some cloud-provider locations may not offer the action.
+
+## Get started
+
+The current setup is a local build. You need macOS and Apple's Command Line Tools; full Xcode is not required.
+
+1. Install the Command Line Tools if you do not already have them:
+
+   ```sh
+   xcode-select --install
+   ```
+
+2. Clone and build:
+
+   ```sh
+   git clone https://github.com/dano1066/macbook-windows-qol.git
+   cd macbook-windows-qol
+   ./scripts/build.sh
+   open 'build/Windows QoL.app'
+   ```
+
+3. Find the **four-pane icon** in the menu bar and open **Settings… → Permissions**. Grant the permissions needed for the features you want, then quit and reopen the app if macOS requests it.
+
+The app is built at `build/Windows QoL.app`. It uses an ad-hoc local signature, rather than an authenticated developer identity. Rebuilds can sometimes require Accessibility permission to be refreshed.
+
+**Startup changes your native Dock settings.** Windows QoL hides the Dock and temporarily increases its edge-reveal delay. Read [Native Dock behavior](#native-dock-behavior) before running it.
+
+### Settings and everyday controls
+
+The menu-bar menu contains **Settings…**, **Reload Windows QoL** and **Quit Windows QoL**.
+
+| Settings section | Controls |
+| --- | --- |
+| **General** | Open at login. Requires macOS 13 or later; macOS may require approval. |
+| **Taskbar** | Layout, spacing, monitor-entry focus and primary-taskbar pins. |
+| **Shortcuts** | Enable or disable the Windows-style Fn shortcuts. |
+| **Permissions** | Check Accessibility and screen-capture access and request permission. |
+
+**Reload** quits normally and reopens the existing build. It does not compile source changes. After updating the source, quit the app, run `./scripts/build.sh`, then reopen `build/Windows QoL.app`.
+
+## Permissions
+
+Windows QoL uses macOS permissions to work with other apps. Grant access through System Settings; the app cannot grant it itself.
+
+| Permission | Used for |
+| --- | --- |
+| **Accessibility** | Detecting, focusing, minimizing, moving and resizing windows; reading Dock badges; handling Fn shortcuts and title-bar double-clicks. |
+| **Screen Recording / Screen & System Audio Recording** | Window thumbnails and display screenshots. This permission grants broader screen access. |
+| **Automation** | Controlling System Events for the Dock, and Finder or Terminal when opening new windows. macOS may prompt when you first use an action. |
+| **Finder extension enablement** | Showing **Open Terminal Here** in supported Finder context menus. |
+
+Without Accessibility, taskbar launchers can still be available, but window controls and Fn shortcuts will not work. Screen-capture access is optional if you do not need thumbnails or screenshots.
+
+macOS owns its permission lists. If requesting access does not create an entry, use the **+** button in the relevant privacy pane to add `build/Windows QoL.app` manually where supported.
+
+## Shortcuts
+
+Enable or disable these together in **Settings… → Shortcuts**. Fn-C and Fn-A replace macOS's Control Centre and Dock shortcuts while enabled.
+
+![Shortcut reference showing editing shortcuts, a new Finder window and screenshots of the current display or a selected area.](docs/images/shortcuts.svg)
+
+| Shortcut | Action |
+| --- | --- |
+| **Fn-C / V / X** | Copy, paste and cut. |
+| **Fn-A** | Select all. |
+| **Fn-Z / Y** | Undo and redo. |
+| **Fn-F** | Find. |
+| **Fn-E** | Open a new Finder window. |
+| **Fn-S** | Copy a screenshot of the display under the pointer to the clipboard. |
+| **Fn-Shift-S** | Start macOS's area screenshot tool and copy the result to the clipboard. |
+
+Secure Input, applications, macOS or the keyboard itself may intercept a shortcut. When Secure Input is detected as Fn is pressed, the app displays a notice; standard Command shortcuts remain useful alternatives.
+
+## Native Dock behavior
+
+macOS has one native Dock. The button at the far right of a taskbar toggles its **automatically hide and show** setting globally; it does not move the Dock to the clicked monitor.
+
+- **On startup:** the app hides the Dock and sets its edge-reveal delay to 1,000 seconds to reduce accidental reveals.
+- **While running:** the Dock toggle uses System Events and avoids restarting the Dock on every click. It may need Automation permission.
+- **On a normal quit:** the app restores the saved reveal delay, provided that setting still has the app's temporary value, and makes the Dock visible. The Dock restarts briefly.
+- **On reload:** normal shutdown runs before the app opens again, so the Dock can briefly reappear and restart.
+- **After a crash or force quit:** shutdown cleanup cannot run. Reopen the app and quit normally to restore the Dock.
+
+To make the native Dock visible immediately if recovery is needed:
 
 ```sh
-./scripts/build.sh
-open 'build/Windows QoL.app'
+defaults write com.apple.dock autohide -bool false && killall Dock
 ```
 
-Choose **Settings…** from the Windows QoL menu-bar menu to check Accessibility and screen-capture access and request them when needed. macOS may require quitting and reopening the app after granting access. Without Accessibility, the primary bar can launch pinned apps, but window tracking, focusing and Fn shortcuts will not work. Fn-S requests screen-capture access to copy the current display. macOS controls the permission lists; if an app entry does not appear, use the + button in the relevant System Settings pane to add the app manually.
+This changes the system-wide Dock auto-hide setting and restarts the Dock.
 
-In **Settings… → General**, choose **Enable** to open Windows QoL when you log in, or **Disable** to stop opening it automatically. This control requires macOS 13 or later and macOS may ask you to approve the item in Login Items & Extensions. If you previously added a separate login item manually, remove that item in System Settings to avoid a duplicate.
+## Troubleshooting
 
-Quit from the Windows QoL menu-bar menu. If the hidden Apple Dock reappears over the bar, you can also move the Dock to the left or right in System Settings → Desktop & Dock.
+**The taskbar appears, but window controls do nothing.** Check **Settings… → Permissions → Accessibility**. Confirm the allowed app is the current `build/Windows QoL.app`, then quit and reopen it. If macOS shows access enabled but the app still reports no access, rebuilding or restarting alone may not resolve a cached permission identity.
 
-## Current limitations
+**Previews show app icons.** Check screen-capture permission. Real thumbnails require macOS 14 or later, a non-minimized window and an unambiguous match between the tracked window and the capture source.
 
-This is an early prototype. Window detection uses Accessibility and depends on what each application exposes. The app assigns windows to the display containing the largest portion and remembers the last display for a window minimized while the app is running. Windows already minimized at startup depend on their reported position, which may not be available or reliable. Hidden apps are omitted. Windows in other Spaces and full-screen apps may behave differently; the taskbar can overlap content and does not reserve desktop space. Some app windows, unusual dialogs, and apps without bundle identifiers may not appear. A crowded bar clips icons rather than scrolling. **Reset pinned apps** restores the default pinned apps. This app uses an ad-hoc local signature with a stable identifier-based requirement, not a developer identity; macOS may still require Accessibility permission to be re-added after rebuilds.
+**Open Terminal Here is missing or duplicated.** Check Finder extension enablement. Finder can cache an older extension after a rebuild; restarting Finder can refresh it, but may disrupt open Finder windows. Some virtual or cloud locations do not support the action.
+
+**A shortcut does not fire.** Check Accessibility access, the shortcut toggle and whether Secure Input is active. Try the native Command shortcut. Screenshots need screen-capture access; opening Finder may need Automation access.
+
+**Open at login runs twice.** If you previously added a manual login item, remove that duplicate from System Settings before using the app's own login setting.
+
+**A window overlaps the bar.** macOS does not reserve desktop space for this taskbar. The app adjusts matching near-full-height windows, but ordinary windows, custom app layouts and apps that refuse resizing can still overlap it.
+
+## Limitations
+
+This is an early prototype, developed around a personal desktop workflow. Expect differences between apps, macOS versions, keyboards and monitor arrangements.
+
+- Window tracking depends on the Accessibility information each app exposes. Hidden apps, unusual dialogs, other Spaces and full-screen windows may behave differently or be omitted.
+- Minimized windows retain their last known display during a session. Windows already minimized at startup may have no usable position.
+- Restoring a window returns it to its previous size; it does not automatically maximize it.
+- A crowded taskbar clips excess icons rather than scrolling. The multi-window preview chooser can scroll horizontally.
+- A taskbar and the native Dock can overlap content. The custom bar does not reserve a macOS desktop work area.
+- Platform requirements vary by feature: launch at login needs macOS 13 or later; real window thumbnails need macOS 14 or later. A declared build minimum is not a guarantee of testing on every older macOS release.
+
+## Reporting a problem
+
+[Open an issue](https://github.com/dano1066/macbook-windows-qol/issues) with your macOS version, the affected app, monitor arrangement, reproduction steps and relevant permission status. Crop screenshots to the affected UI and remove private window titles or document contents before sharing them.
