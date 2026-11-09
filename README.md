@@ -20,7 +20,7 @@ Each taskbar shows the apps with windows on that display. Move a window between 
 - **Standard or centered layout.** Choose left-aligned icons or a centered group, with adjustable spacing that contracts when space is limited.
 - **Window indicators and badges.** A line marks visible local windows, a dot marks minimized-only windows, and blue highlights the frontmost local window. The taskbar also mirrors meaningful notification badge text exposed by the native Dock.
 - **Quick access.** Open Spotlight, Finder, a new Terminal window, System Settings or Trash. Finder and Terminal also offer shortcuts to Desktop, Downloads, Documents and Home from their context menus.
-- **Optional focus across monitors.** Enable “Activate windows when moving between monitors” to focus the frontmost window when the pointer enters another display's window area.
+- **Optional focus across monitors.** Enable “Activate windows when moving between monitors” to focus the frontmost window when the pointer enters another display's window area. This passes the specific window ID to macOS and selects it for keyboard input without raising the app’s other windows. The focus helper uses private macOS APIs resolved at runtime; if unavailable, monitor-entry focus stops without falling back to app-wide activation.
 
 To pin an app from settings, bring it to the front, then choose **Settings… → Taskbar → Pin last used app**. Secondary taskbars offer both primary-taskbar and current-taskbar pin options in their context menus.
 

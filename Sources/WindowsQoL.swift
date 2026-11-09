@@ -1046,8 +1046,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard record.app.processIdentifier == pid_t(pid),
               abs(frame.minX - rect.minX) + abs(frame.minY - rect.minY) + abs(frame.width - rect.width) + abs(frame.height - rect.height) < 12,
               !isActive(record) else { return }
-        focus(record, preserveRemoteMinimized: true)
+        guard let number = info[kCGWindowNumber as String] as? NSNumber else { return }
+        focusOnMonitorEntry(record, windowID: number.uint32Value)
     }
+    func focusOnMonitorEntry(_ record: WindowRecord, windowID: CGWindowID) {
+        // Use the exact Quartz ID verified under the pointer. Raising an AX
+        // window or setting AXFocusedWindow can itself promote sibling windows.
+        guard !record.minimized, !record.app.isHidden, !record.app.isTerminated else { return }
+        let status = WindowsQoLActivateWindowOnly(record.app.processIdentifier, record.element, windowID)
+        NSLog("Monitor focus: display=%u pid=%d window=%u status=%d", record.displayID, record.app.processIdentifier, windowID, status)
+    }
+
     @objc func reloadApp() {
         let helper = Process()
         helper.executableURL = URL(fileURLWithPath: "/bin/sh")
