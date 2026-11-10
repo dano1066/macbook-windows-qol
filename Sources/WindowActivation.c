@@ -30,6 +30,15 @@ static void loadFocusAPI(void) {
 }
 #endif
 
+AXError WindowsQoLGetWindowID(AXUIElementRef window, CGWindowID *windowID) {
+#ifndef WINDOW_ACTIVATION_TESTING
+    pthread_once(&loadOnce, loadFocusAPI);
+#endif
+    *windowID = kCGNullWindowID;
+    if (!getWindowID) return kAXErrorNotImplemented;
+    return getWindowID(window, windowID);
+}
+
 static CGError selectKeyWindow(ProcessSerialNumber *process, CGWindowID windowID) {
     uint8_t event[0xf8] = {0};
     event[0x04] = 0xf8;

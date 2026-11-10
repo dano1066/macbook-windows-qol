@@ -5,5 +5,7 @@
 
 // Request focus for a verified window ID without raising sibling windows.
 OSStatus WindowsQoLActivateWindowOnly(pid_t pid, AXUIElementRef _Nonnull window, CGWindowID windowID);
+// Read the AX window's identity, including while it is minimized/off screen.
+AXError WindowsQoLGetWindowID(AXUIElementRef _Nonnull window, CGWindowID * _Nonnull windowID);
 
 #endif

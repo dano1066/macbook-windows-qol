@@ -1540,7 +1540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if activateOpened {
                     self.records = windows(previous: self.records)
                     if let record = self.records.first(where: { CFEqual($0.element, target) }) {
-                        self.focus(record, preserveRemoteMinimized: true)
+                        self.focus(record)
                     } else if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
                         app.activate(options: [])
                         AXUIElementPerformAction(target, kAXRaiseAction as CFString)
@@ -1818,52 +1818,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return CFEqual(focused, record.element)
     }
     func toggle(_ record: WindowRecord) {
-        let frontmost = frontmostWindowsByDisplay(records)[record.displayID]
-        if !record.minimized && (frontmost.map { CFEqual($0, record.element) } ?? isActive(record)) {
-            let result = AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
-            if result != .success { focus(record, preserveRemoteMinimized: true) }
-        } else { focus(record, preserveRemoteMinimized: true) }
+        let current = windows(previous: records)
+        guard let target = current.first(where: { CFEqual($0.element, record.element) }) else { return }
+        let frontmost = frontmostWindowsByDisplay(current)[target.displayID]
+        if !target.minimized && (frontmost.map { CFEqual($0, target.element) } ?? isActive(target)) {
+            minimize(target, current: current)
+        } else { focus(target) }
     }
-    func focus(_ record: WindowRecord, preserveRemoteMinimized: Bool = false) {
-        // Activating an app can raise all of its windows. Preserve the frontmost
-        // windows on other displays without activating their applications.
-        let remoteFrontmost = preserveRemoteMinimized ? frontmostWindowsByDisplay(records).filter { display, window in
-            guard display != record.displayID,
-                  let owner = records.first(where: { CFEqual($0.element, window) }) else { return false }
-            return owner.app.processIdentifier != record.app.processIdentifier
-        } : [:]
-        let remoteMinimized = preserveRemoteMinimized ? records.filter {
-            $0.app.processIdentifier == record.app.processIdentifier && $0.displayID != record.displayID && $0.minimized
-        }.map { $0.element } : []
-        if record.minimized { AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
-        record.app.activate(options: [])
-        AXUIElementPerformAction(record.element, kAXRaiseAction as CFString)
-        func restoreRemoteFrontmost() {
-            let currentRecords = windows(previous: self.records)
-            let currentFrontmost = frontmostWindowsByDisplay(currentRecords)
-            for (display, previous) in remoteFrontmost {
-                guard let current = currentFrontmost[display], !CFEqual(current, previous),
-                      let owner = currentRecords.first(where: { CFEqual($0.element, current) }),
-                      owner.app.processIdentifier == record.app.processIdentifier,
-                      currentRecords.contains(where: { CFEqual($0.element, previous) && !$0.minimized }) else { continue }
-                AXUIElementPerformAction(previous, kAXRaiseAction as CFString)
+    func minimize(_ record: WindowRecord, current: [WindowRecord]) {
+        // Minimizing Firefox's key window lets Firefox select a sibling, even
+        // on another display. Hand off focus first so it is no longer key.
+        let frontmost = frontmostWindowsByDisplay(current)
+        let otherApps = current.filter { $0.app.processIdentifier != record.app.processIdentifier }
+        let underneath = frontmostWindowsByDisplay(otherApps)[record.displayID]
+        let successor = underneath.flatMap { window in otherApps.first { CFEqual($0.element, window) } }
+            ?? otherApps.first { candidate in
+                candidate.displayID != record.displayID &&
+                frontmost[candidate.displayID].map { CFEqual($0, candidate.element) } == true
+            }
+        func applyMinimize() {
+            let result = AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            NSLog("Taskbar minimize: pid=%d status=%d", record.app.processIdentifier, result.rawValue)
+        }
+        guard isActive(record), let successor = successor else { applyMinimize(); return }
+        guard focus(successor) == noErr else { return }
+        // Focus events are asynchronous. Do not minimize while the old app is
+        // still active, and never re-activate a successor after the user moves on.
+        func finishHandoff(_ attempts: Int) {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier != record.app.processIdentifier {
+                applyMinimize()
+            } else if attempts > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { finishHandoff(attempts - 1) }
+            } else {
+                NSLog("Taskbar minimize: focus handoff timed out; left window unchanged")
             }
         }
-        if !remoteFrontmost.isEmpty {
-            restoreRemoteFrontmost()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { restoreRemoteFrontmost() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { restoreRemoteFrontmost() }
+        finishHandoff(6)
+    }
+    @discardableResult
+    func focus(_ record: WindowRecord) -> OSStatus {
+        // Share monitor entry's window-specific activation. App activation and
+        // AXRaise can promote sibling windows on other displays.
+        guard !record.app.isHidden, !record.app.isTerminated else { return OSStatus(AXError.cannotComplete.rawValue) }
+        var windowID = CGWindowID(0)
+        let identityStatus = WindowsQoLGetWindowID(record.element, &windowID)
+        guard identityStatus == .success, windowID != 0 else { return OSStatus(AXError.cannotComplete.rawValue) }
+        if record.minimized {
+            let result = AXUIElementSetAttributeValue(record.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            guard result == .success else { return OSStatus(result.rawValue) }
         }
-        if !remoteMinimized.isEmpty {
-            func restoreMinimizedState() {
-                for window in remoteMinimized {
-                    let minimized: Bool = attribute(window, kAXMinimizedAttribute as CFString) ?? true
-                    if !minimized { AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }
-                }
-            }
-            restoreMinimizedState()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { restoreMinimizedState() }
-        }
+        let status = WindowsQoLActivateWindowOnly(record.app.processIdentifier, record.element, windowID)
+        NSLog("Taskbar focus: display=%u pid=%d window=%u status=%d", record.displayID, record.app.processIdentifier, windowID, status)
+        return status
     }
 }
 final class PreviewButtonCell: NSButtonCell {

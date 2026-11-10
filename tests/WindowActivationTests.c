@@ -109,7 +109,16 @@ int main(void) {
         memcpy(&number, events[i] + 0x3c, sizeof(number));
         assert(number == (i == 0 ? 77 : 99));
     }
+    CGWindowID number = 0;
+    reset();
+    assert(WindowsQoLGetWindowID(expectedWindow, &number) == kAXErrorSuccess);
+    assert(number == 99); noChanges();
+    reset(); getWindowID = NULL; number = 99;
+    assert(WindowsQoLGetWindowID(expectedWindow, &number) == kAXErrorNotImplemented);
+    assert(number == 0); noChanges();
+    reset(); windowResult = kAXErrorCannotComplete;
+    assert(WindowsQoLGetWindowID(expectedWindow, &number) == kAXErrorCannotComplete); noChanges();
     CFRelease(expectedWindow);
     CFRelease(previousWindow);
-    puts("Window activation tests passed (11 cases).");
+    puts("Window activation tests passed (14 cases).");
 }

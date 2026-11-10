@@ -1,10 +1,12 @@
 // Compiled after the production declarations, replacing the normal app entry point.
-// Uses existing Firefox windows without moving, resizing, or minimizing them.
+// --taskbar-minimize also minimizes and restores the target Firefox window.
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 let reportURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("monitor-focus-live.json")
 var report: [String: Any] = [:]
 var cover: NSWindow?
+var minimizedTarget: WindowRecord?
+let checkMinimize = CommandLine.arguments.contains("--taskbar-minimize")
 let originalApp = NSWorkspace.shared.frontmostApplication
 let originalRoot = originalApp.map { AXUIElementCreateApplication($0.processIdentifier) }
 let originalWindow: AXUIElement? = originalRoot.flatMap { attribute($0, kAXFocusedWindowAttribute as CFString) }
@@ -26,6 +28,12 @@ func quartzID(_ record: WindowRecord) -> CGWindowID? {
 }
 func finish(_ error: String? = nil) {
     if let error { report["error"] = error }
+    if let target = minimizedTarget {
+        AXUIElementSetAttributeValue(target.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        if let id = quartzID(target) {
+            report["restoreTargetStatus"] = WindowsQoLActivateWindowOnly(target.app.processIdentifier, target.element, id)
+        }
+    }
     cover?.close(); cover = nil
     if let originalApp, let originalWindow,
        let record = windows(previous: []).first(where: { CFEqual($0.element, originalWindow) }),
@@ -72,6 +80,13 @@ func runLiveCheck() {
     cover = window
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
+    if checkMinimize {
+        // Establish the clicked window as key without the cover application's
+        // activation or an AXRaise changing the target-display baseline.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            report["setupTargetStatus"] = WindowsQoLActivateWindowOnly(target.app.processIdentifier, target.element, targetID)
+        }
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
         let remotePoint = CGPoint(x: remoteFrame.midX, y: remoteFrame.midY)
         let targetPoint = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
@@ -87,6 +102,42 @@ func runLiveCheck() {
         report["remoteTopBefore"] = window.windowNumber
         let controller = AppDelegate()
         controller.focusOnMonitorEntry(target, windowID: targetID)
+        if checkMinimize {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard controller.isActive(target), topAt(remotePoint) == CGWindowID(window.windowNumber) else {
+                    finish("Could not focus target without uncovering remote Firefox."); return
+                }
+                minimizedTarget = target
+                controller.records = windows(previous: [])
+                controller.toggle(target)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    let minimized: Bool = attribute(target.element, kAXMinimizedAttribute as CFString) ?? false
+                    let remoteMinimized: Bool = attribute(remote.element, kAXMinimizedAttribute as CFString) ?? true
+                    let covered = topAt(remotePoint) == CGWindowID(window.windowNumber)
+                    report["targetMinimized"] = minimized
+                    report["remoteRemainsCovered"] = covered
+                    report["remoteRemainsUnminimized"] = !remoteMinimized
+                    report["passed"] = minimized && covered && !remoteMinimized
+                    // Exercise the taskbar restore path as well.
+                    controller.records = windows(previous: controller.records)
+                    guard let restored = controller.records.first(where: { CFEqual($0.element, target.element) }) else {
+                        finish("Lost target after minimizing."); return
+                    }
+                    report["taskbarRestoreStatus"] = controller.focus(restored)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        let restoredMinimized: Bool = attribute(target.element, kAXMinimizedAttribute as CFString) ?? true
+                        let restoredCovered = topAt(remotePoint) == CGWindowID(window.windowNumber)
+                        let unchangedFrames = windowRect(target.element) == targetFrame && windowRect(remote.element) == remoteFrame
+                        report["restoredTargetFocused"] = controller.isActive(target)
+                        report["remoteCoveredAfterRestore"] = restoredCovered
+                        report["framesUnchanged"] = unchangedFrames
+                        report["passed"] = (report["passed"] as? Bool == true) && !restoredMinimized && restoredCovered && controller.isActive(target) && unchangedFrames
+                        finish()
+                    }
+                }
+            }
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             let root = AXUIElementCreateApplication(target.app.processIdentifier)
             let focused: AXUIElement? = attribute(root, kAXFocusedWindowAttribute as CFString)

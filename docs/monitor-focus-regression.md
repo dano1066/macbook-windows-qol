@@ -35,6 +35,31 @@ An optional last command-line argument selects a target Quartz window ID. Always
 rebuild and reopen the normal app after this test; the test executable exits.
 This check changes focus temporarily and should only run during active debugging.
 
+Pass `--taskbar-minimize` before the optional window ID to exercise the production
+taskbar toggle and restore paths after focusing the target. This mode temporarily
+minimizes the target, verifies that the remote Firefox window stays covered and
+unminimized, restores the target through taskbar focus, and checks focus, stacking,
+and window frames again. Cleanup restores the target and previous focus.
+
+## Taskbar minimize and restore, 10 November 2026
+
+The taskbar previously minimized the active Firefox window directly, allowing
+Firefox to choose a sibling window on another display. It now hands focus to the
+top window of another app underneath the target on the same display, or to an
+already frontmost window on another display if none is available locally. It waits
+for the process focus handoff before minimizing. A failed handoff leaves the
+window unchanged. With no successor, ordinary minimize behavior remains.
+
+Taskbar focus and restore now use the same window-ID-specific helper as monitor
+entry, replacing app activation, AXRaise, and delayed remote-window repairs. The
+helper reads the AX window ID even when the target is minimized.
+
+The live Firefox minimize/restore check passed in both display directions using
+a temporary cover over the remote Firefox window. The clicked window minimized,
+the remote window stayed covered and unminimized, and the target regained focus
+on restore without uncovering the remote window. Dan confirmed the physical taskbar-click behavior with Claude works on
+10 November 2026.
+
 ## Live result, 9 November 2026
 
 The replacement passed the live Firefox check in both display directions on Dan's
