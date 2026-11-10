@@ -5,8 +5,11 @@ app.setActivationPolicy(.regular)
 let reportURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("monitor-focus-live.json")
 var report: [String: Any] = [:]
 var cover: NSWindow?
+var localCover: NSWindow?
 var minimizedTarget: WindowRecord?
 let checkMinimize = CommandLine.arguments.contains("--taskbar-minimize")
+let checkCoveredFocus = CommandLine.arguments.contains("--taskbar-focus")
+let coverKeyWindow = CommandLine.arguments.contains("--covered-key-window")
 let originalApp = NSWorkspace.shared.frontmostApplication
 let originalRoot = originalApp.map { AXUIElementCreateApplication($0.processIdentifier) }
 let originalWindow: AXUIElement? = originalRoot.flatMap { attribute($0, kAXFocusedWindowAttribute as CFString) }
@@ -34,6 +37,7 @@ func finish(_ error: String? = nil) {
             report["restoreTargetStatus"] = WindowsQoLActivateWindowOnly(target.app.processIdentifier, target.element, id)
         }
     }
+    localCover?.close(); localCover = nil
     cover?.close(); cover = nil
     if let originalApp, let originalWindow,
        let record = windows(previous: []).first(where: { CFEqual($0.element, originalWindow) }),
@@ -80,7 +84,7 @@ func runLiveCheck() {
     cover = window
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
-    if checkMinimize {
+    if checkMinimize || checkCoveredFocus {
         // Establish the clicked window as key without the cover application's
         // activation or an AXRaise changing the target-display baseline.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
@@ -102,6 +106,47 @@ func runLiveCheck() {
         report["remoteTopBefore"] = window.windowNumber
         let controller = AppDelegate()
         controller.focusOnMonitorEntry(target, windowID: targetID)
+        if checkCoveredFocus {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard let targetScreen = NSScreen.screens.first(where: { displayID($0) == target.displayID }) else {
+                    finish("Target display disappeared."); return
+                }
+                let local = NSWindow(contentRect: targetScreen.visibleFrame.insetBy(dx: 8, dy: 8), styleMask: [.titled], backing: .buffered, defer: false)
+                local.title = "Windows QoL focus regression — local cover"
+                local.isReleasedWhenClosed = false
+                localCover = local
+                local.orderFrontRegardless()
+                if !coverKeyWindow { app.activate(ignoringOtherApps: true) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    report["targetAlreadyKeyBeforeClick"] = controller.isActive(target)
+                    report["localCoverWindow"] = local.windowNumber
+                    report["coveredTargetTopBefore"] = topAt(targetPoint) ?? 0
+                    guard topAt(targetPoint) == CGWindowID(local.windowNumber),
+                          topAt(remotePoint) == CGWindowID(window.windowNumber),
+                          controller.isActive(target) == coverKeyWindow else {
+                        finish("Could not establish the covered-window baseline."); return
+                    }
+                    controller.records = windows(previous: [])
+                    controller.toggle(target)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                        let minimized: Bool = attribute(target.element, kAXMinimizedAttribute as CFString) ?? true
+                        let remoteMinimized: Bool = attribute(remote.element, kAXMinimizedAttribute as CFString) ?? true
+                        let raised = topAt(targetPoint) == targetID
+                        let covered = topAt(remotePoint) == CGWindowID(window.windowNumber)
+                        let unchangedFrames = windowRect(target.element) == targetFrame && windowRect(remote.element) == remoteFrame
+                        report["targetRaised"] = raised
+                        report["targetFocused"] = controller.isActive(target)
+                        report["targetRemainsUnminimized"] = !minimized
+                        report["remoteRemainsCovered"] = covered
+                        report["remoteRemainsUnminimized"] = !remoteMinimized
+                        report["framesUnchanged"] = unchangedFrames
+                        report["passed"] = raised && controller.isActive(target) && !minimized && covered && !remoteMinimized && unchangedFrames
+                        finish()
+                    }
+                }
+            }
+            return
+        }
         if checkMinimize {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard controller.isActive(target), topAt(remotePoint) == CGWindowID(window.windowNumber) else {
@@ -127,11 +172,13 @@ func runLiveCheck() {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                         let restoredMinimized: Bool = attribute(target.element, kAXMinimizedAttribute as CFString) ?? true
                         let restoredCovered = topAt(remotePoint) == CGWindowID(window.windowNumber)
+                        let restoredRaised = topAt(targetPoint) == targetID
                         let unchangedFrames = windowRect(target.element) == targetFrame && windowRect(remote.element) == remoteFrame
                         report["restoredTargetFocused"] = controller.isActive(target)
                         report["remoteCoveredAfterRestore"] = restoredCovered
+                        report["restoredTargetRaised"] = restoredRaised
                         report["framesUnchanged"] = unchangedFrames
-                        report["passed"] = (report["passed"] as? Bool == true) && !restoredMinimized && restoredCovered && controller.isActive(target) && unchangedFrames
+                        report["passed"] = (report["passed"] as? Bool == true) && !restoredMinimized && restoredCovered && restoredRaised && controller.isActive(target) && unchangedFrames
                         finish()
                     }
                 }

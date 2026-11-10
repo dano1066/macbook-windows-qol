@@ -1841,7 +1841,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Taskbar minimize: pid=%d status=%d", record.app.processIdentifier, result.rawValue)
         }
         guard isActive(record), let successor = successor else { applyMinimize(); return }
-        guard focus(successor) == noErr else { return }
+        guard focus(successor, bringForward: false) == noErr else { return }
         // Focus events are asynchronous. Do not minimize while the old app is
         // still active, and never re-activate a successor after the user moves on.
         func finishHandoff(_ attempts: Int) {
@@ -1856,9 +1856,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         finishHandoff(6)
     }
     @discardableResult
-    func focus(_ record: WindowRecord) -> OSStatus {
-        // Share monitor entry's window-specific activation. App activation and
-        // AXRaise can promote sibling windows on other displays.
+    func focus(_ record: WindowRecord, bringForward: Bool = true) -> OSStatus {
+        // Select this exact key window before raising it. Focus alone preserves
+        // stacking, which is useful for monitor entry but leaves a covered
+        // taskbar selection behind its cover. Never activate the whole app.
         guard !record.app.isHidden, !record.app.isTerminated else { return OSStatus(AXError.cannotComplete.rawValue) }
         var windowID = CGWindowID(0)
         let identityStatus = WindowsQoLGetWindowID(record.element, &windowID)
@@ -1869,6 +1870,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let status = WindowsQoLActivateWindowOnly(record.app.processIdentifier, record.element, windowID)
         NSLog("Taskbar focus: display=%u pid=%d window=%u status=%d", record.displayID, record.app.processIdentifier, windowID, status)
+        if status == noErr && bringForward {
+            let result = AXUIElementPerformAction(record.element, kAXRaiseAction as CFString)
+            NSLog("Taskbar raise: window=%u status=%d", windowID, result.rawValue)
+            return OSStatus(result.rawValue)
+        }
         return status
     }
 }

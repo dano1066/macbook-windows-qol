@@ -51,14 +51,36 @@ for the process focus handoff before minimizing. A failed handoff leaves the
 window unchanged. With no successor, ordinary minimize behavior remains.
 
 Taskbar focus and restore now use the same window-ID-specific helper as monitor
-entry, replacing app activation, AXRaise, and delayed remote-window repairs. The
-helper reads the AX window ID even when the target is minimized.
+entry, replacing app activation and delayed remote-window repairs. The helper
+reads the AX window ID even when the target is minimized. Explicit taskbar
+selections additionally raise the selected window after the key-window request;
+monitor entry and the pre-minimize focus handoff preserve stacking.
 
 The live Firefox minimize/restore check passed in both display directions using
 a temporary cover over the remote Firefox window. The clicked window minimized,
 the remote window stayed covered and unminimized, and the target regained focus
 on restore without uncovering the remote window. Dan confirmed the physical taskbar-click behavior with Claude works on
 10 November 2026.
+
+### Covered-window regression, 10 November 2026
+
+Dan subsequently reported that clicking an unminimized background app no longer
+brought its window forward. The original tests exercised already-visible and
+minimized windows, missing this case. A new live check reproduced the failure:
+the target became focused but remained behind a temporary local cover.
+
+Taskbar focus now explicitly raises the selected AX window after window-specific
+activation succeeds, following the ordering in
+[yabai's focus-with-raise path](https://github.com/asmvik/yabai/blob/master/src/window_manager.c).
+The monitor-entry helper is unchanged, and the minimize handoff opts out of raising.
+
+Run the live probe with `--taskbar-focus` to cover both Firefox windows and call
+the production taskbar toggle on the covered target. Add `--covered-key-window`
+to keep Firefox key beneath its cover, exercising the helper's already-focused
+early return. Both modes require the target to become focused and visibly frontmost,
+the remote Firefox window to stay covered and unminimized, and frames to remain
+unchanged. The checks passed in both monitor directions. The existing minimize
+and restore checks and monitor-entry check also passed. Dan confirmed the physical taskbar behavior is fixed on 10 November 2026.
 
 ## Live result, 9 November 2026
 
