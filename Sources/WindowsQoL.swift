@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import os
 import ScreenCaptureKit
 import ServiceManagement
 
@@ -504,23 +505,78 @@ final class TitlebarZoom {
     }
 }
 
-// Translate selected Fn combinations; all other events pass through.
+private let monitorCopyLog = Logger(subsystem: "local.dan.windowsqol", category: "MonitorCopy")
+
+private struct MonitorCopySource {
+    let app: NSRunningApplication
+    let window: AXUIElement?
+    let selectedText: String?
+
+    func performCopy() -> Bool {
+        guard !app.isTerminated else { return false }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.025)
+        if let window = window,
+           let focused: AXUIElement = attribute(root, kAXFocusedWindowAttribute as CFString),
+           !CFEqual(focused, window) { return false }
+        guard let bar: AXUIElement = attribute(root, kAXMenuBarAttribute as CFString) else { return false }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.12
+        func read<T>(_ element: AXUIElement, _ key: String) -> T? {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return nil }
+            AXUIElementSetMessagingTimeout(element, Float(min(0.025, remaining)))
+            return attribute(element, key as CFString)
+        }
+        let headings: [AXUIElement] = read(bar, kAXChildrenAttribute) ?? []
+        // Try Edit first where available. Match the shortcut itself so localized
+        // menu titles work and commands such as Copy Style are excluded.
+        let edit = headings.first { read($0, kAXTitleAttribute) as String? == "Edit" }
+        let ordered = edit.map { item in [item] + headings.filter { !CFEqual($0, item) } } ?? headings
+        for heading in ordered {
+            let menus: [AXUIElement] = read(heading, kAXChildrenAttribute) ?? []
+            for menu in menus {
+                let commands: [AXUIElement] = read(menu, kAXChildrenAttribute) ?? []
+                for command in commands {
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+                    let key: String? = read(command, kAXMenuItemCmdCharAttribute)
+                    let modifiers: Int? = key?.lowercased() == "c" ? read(command, kAXMenuItemCmdModifiersAttribute) : nil
+                    // AX uses zero for the default Command-only modifier.
+                    guard modifiers == 0,
+                          read(command, kAXEnabledAttribute) as Bool? == true else { continue }
+                    return AXUIElementPerformAction(command, kAXPressAction as CFString) == .success
+                }
+            }
+        }
+        return false
+    }
+}
+
+// Translate selected Fn combinations and handle Copy after a monitor handoff.
 final class WindowsShortcuts {
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private var pressed = Set<Int64>()
     private var screenshotUsesRegion = false
+    private var monitorSelection: (source: MonitorCopySource, destination: NSRunningApplication)?
+    private var mouseDownPoint: CGPoint?
+    private var selectionPoints: (start: CGPoint, end: CGPoint)?
+    private var preparedFirefox: NSRunningApplication?
+    private var swallowedCopy = false
+    private static let forwardedCopyTag: Int64 = 0x574F4C43
+    var translatesFn = true
     var isRunning: Bool { tap != nil }
     func start() -> Bool {
         if tap != nil { return true }
-        let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue) | (CGEventMask(1) << CGEventType.keyUp.rawValue)
+        let events: [CGEventType] = [.keyDown, .keyUp, .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
+        let mask = events.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, context in
             guard let context = context else { return Unmanaged.passUnretained(event) }
             return Unmanaged<WindowsShortcuts>.fromOpaque(context).takeUnretainedValue().handle(type, event)
-        }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        }, userInfo: Unmanaged.passUnretained(self).toOpaque()),
+              let runSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else { return false }
         tap = port
-        source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
-        if let source = source { CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes) }
+        source = runSource
+        CFRunLoopAddSource(CFRunLoopGetMain(), runSource, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
         return true
     }
@@ -528,17 +584,174 @@ final class WindowsShortcuts {
         if let tap = tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let source = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         tap = nil; source = nil; pressed.removeAll()
+        swallowedCopy = false
+        resetMonitorCopy()
+    }
+    fileprivate func sourceBeforeMonitorFocus() -> MonitorCopySource? {
+        guard isRunning, !IsSecureEventInputEnabled(),
+              let app = NSWorkspace.shared.frontmostApplication, app.activationPolicy == .regular else { return nil }
+        if let selection = monitorSelection, selection.destination == app, selection.source.app != app {
+            return selection.source
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.06
+        let window: AXUIElement? = selectionAttribute(root, kAXFocusedWindowAttribute as CFString, before: deadline)
+        let focused: AXUIElement? = selectionAttribute(root, kAXFocusedUIElementAttribute as CFString, before: deadline)
+        if let focused = focused {
+            let subrole: String? = selectionAttribute(focused, kAXSubroleAttribute as CFString, before: deadline)
+            guard subrole != (kAXSecureTextFieldSubrole as String) else { return nil }
+        }
+        let text = selectedText(root: root, focused: focused, before: deadline)
+        return MonitorCopySource(app: app, window: window, selectedText: text)
+    }
+    private func selectedText(root: AXUIElement, focused: AXUIElement?, before deadline: TimeInterval) -> String? {
+        if let focused = focused {
+            if let text: String = selectionAttribute(focused, kAXSelectedTextAttribute as CFString, before: deadline),
+               !text.isEmpty { return text }
+        }
+        // Browser pages can hold a selection while keyboard focus is elsewhere.
+        // Use the mouse gesture to find the document that owns the selection.
+        if let points = selectionPoints {
+            for point in points.start == points.end ? [points.end] : [points.end, points.start] {
+                guard limitSelectionQuery(root, before: deadline) else { return nil }
+                var hit: AXUIElement?
+                if AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &hit) == .success,
+                   let hit = hit, let text = documentSelection(at: hit, before: deadline) { return text }
+            }
+        }
+        return focused.flatMap { documentSelection(at: $0, before: deadline) }
+    }
+    private func limitSelectionQuery(_ element: AXUIElement, before deadline: TimeInterval) -> Bool {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0 else { return false }
+        return AXUIElementSetMessagingTimeout(element, Float(remaining)) == .success
+    }
+    private func selectionAttribute<T>(_ element: AXUIElement, _ name: CFString, before deadline: TimeInterval) -> T? {
+        guard limitSelectionQuery(element, before: deadline) else { return nil }
+        return attribute(element, name)
+    }
+    private func documentSelection(at element: AXUIElement, before deadline: TimeInterval) -> String? {
+        var current: AXUIElement? = element
+        // Some apps expose the range on the containing document rather than on
+        // the text leaf returned by the hit test.
+        for _ in 0..<8 {
+            guard let candidate = current,
+                  ProcessInfo.processInfo.systemUptime < deadline else { break }
+            let subrole: String? = selectionAttribute(candidate, kAXSubroleAttribute as CFString, before: deadline)
+            guard subrole != (kAXSecureTextFieldSubrole as String) else { return nil }
+            if let text = textSelection(on: candidate, before: deadline) { return text }
+            let role: String? = selectionAttribute(candidate, kAXRoleAttribute as CFString, before: deadline)
+            if role == kAXWindowRole || role == kAXApplicationRole { break }
+            current = selectionAttribute(candidate, kAXParentAttribute as CFString, before: deadline)
+        }
+        return nil
+    }
+    private func textSelection(on element: AXUIElement, before deadline: TimeInterval) -> String? {
+        // A document-wide marker range can include text across several elements.
+        if let range: CFTypeRef = selectionAttribute(element, "AXSelectedTextMarkerRange" as CFString, before: deadline),
+           limitSelectionQuery(element, before: deadline) {
+            var value: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(element, "AXStringForTextMarkerRange" as CFString, range, &value) == .success,
+               let text = value as? String, !text.isEmpty { return text }
+        }
+        if let text: String = selectionAttribute(element, kAXSelectedTextAttribute as CFString, before: deadline),
+           !text.isEmpty { return text }
+        return nil
+    }
+    fileprivate func saveMonitorSelection(_ source: MonitorCopySource?, for destination: NSRunningApplication) {
+        monitorSelection = source.map { ($0, destination) }
+    }
+    func resetMonitorCopy() {
+        monitorSelection = nil
+        mouseDownPoint = nil
+        selectionPoints = nil
+    }
+    func applicationActivated(_ app: NSRunningApplication) {
+        if let selection = monitorSelection, selection.destination != app {
+            resetMonitorCopy()
+        }
+    }
+    func prepareFirefoxSelection(in app: NSRunningApplication?) {
+        guard isRunning, let app = app, app.bundleIdentifier == "org.mozilla.firefox", app != preparedFirefox else { return }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        // Firefox starts exposing its document accessibility tree on an AXRole
+        // query. Do this before the user selects text so it can track the range.
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.03
+        let role: String? = selectionAttribute(root, kAXRoleAttribute as CFString, before: deadline)
+        if role == (kAXApplicationRole as String) { preparedFirefox = app }
     }
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
             pressed.removeAll()
+            swallowedCopy = false
+            resetMonitorCopy()
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            resetMonitorCopy()
+            if type == .leftMouseDown { mouseDownPoint = event.location }
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .leftMouseUp {
+            if let start = mouseDownPoint { selectionPoints = (start, event.location) }
+            mouseDownPoint = nil
+            return Unmanaged.passUnretained(event)
+        }
+        if event.getIntegerValueField(.eventSourceUserData) == Self.forwardedCopyTag {
             return Unmanaged.passUnretained(event)
         }
         let key = event.getIntegerValueField(.keyboardEventKeycode)
+        if key == kVK_ANSI_C && swallowedCopy {
+            if type == .keyUp {
+                swallowedCopy = false
+                return nil
+            }
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
+            swallowedCopy = false
+        }
+        if type == .keyDown, key == kVK_ANSI_C, event.flags.contains(.maskCommand) {
+            monitorCopyLog.notice("Command-C: pending=\(self.monitorSelection != nil, privacy: .public) active=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "-", privacy: .public)")
+        }
+        if type == .keyDown, let selection = monitorSelection {
+            let modifiers = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn])
+            let isCopy = key == kVK_ANSI_C && event.getIntegerValueField(.keyboardEventAutorepeat) == 0
+                && (modifiers == .maskCommand || modifiers == .maskControl || (translatesFn && modifiers == .maskSecondaryFn))
+            if isCopy, !IsSecureEventInputEnabled(), NSWorkspace.shared.frontmostApplication == selection.destination {
+                if selection.source.app != selection.destination || selection.source.selectedText != nil {
+                    swallowedCopy = true
+                    DispatchQueue.main.async {
+                        let before = NSPasteboard.general.changeCount
+                        defer {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                monitorCopyLog.notice("Copy result: clipboardChanged=\(NSPasteboard.general.changeCount != before, privacy: .public)")
+                            }
+                        }
+                        if let text = selection.source.selectedText {
+                            let clipboard = NSPasteboard.general
+                            clipboard.clearContents()
+                            clipboard.writeObjects([text as NSString])
+                        } else if !selection.source.performCopy(), modifiers != .maskControl {
+                            // The source has no usable Copy command. Deliver the
+                            // original shortcut to the destination if still active.
+                            guard NSWorkspace.shared.frontmostApplication == selection.destination else { return }
+                            for down in [true, false] {
+                                let copy = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(kVK_ANSI_C), keyDown: down)
+                                copy?.flags = .maskCommand
+                                copy?.setIntegerValueField(.eventSourceUserData, value: Self.forwardedCopyTag)
+                                copy?.postToPid(selection.destination.processIdentifier)
+                            }
+                        }
+                    }
+                    return nil
+                }
+            }
+            resetMonitorCopy()
+        }
         // Physical macOS key codes: C, V, S, A, Z, Y, X, F, E.
         guard [8, 9, 1, 0, 6, 16, 7, 3, 14].contains(key) else { return Unmanaged.passUnretained(event) }
         if type == .keyDown {
+            guard translatesFn else { return Unmanaged.passUnretained(event) }
             let otherModifiers: CGEventFlags = key == 1 ? [.maskCommand, .maskControl, .maskAlternate] : [.maskCommand, .maskControl, .maskAlternate, .maskShift]
             guard event.flags.contains(.maskSecondaryFn), event.flags.intersection(otherModifiers).isEmpty else { return Unmanaged.passUnretained(event) }
             if (key == 1 || key == 14) && event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
@@ -806,8 +1019,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit); status.menu = menu
     }
     @objc func applicationActivated(_ notification: Notification) {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        shortcuts.applicationActivated(app)
+        if monitorFocusEnabled { shortcuts.prepareFirefoxSelection(in: app) }
+        guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
         lastExternalApplication = app
     }
     @objc func showPermissions() {
@@ -979,8 +1194,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func toggleShortcuts() {
         shortcutsEnabled.toggle()
-        if shortcutsEnabled && AXIsProcessTrusted() { _ = shortcuts.start() } else { shortcuts.stop() }
+        updateShortcutTap(trusted: AXIsProcessTrusted())
         updatePermissionStatuses(); rebuildMenu()
+    }
+    private func updateShortcutTap(trusted: Bool) {
+        shortcuts.translatesFn = shortcutsEnabled
+        if trusted && (shortcutsEnabled || monitorFocusEnabled) {
+            if !shortcuts.isRunning, shortcuts.start() { signature = "" }
+        } else if shortcuts.isRunning {
+            shortcuts.stop()
+            signature = ""
+        }
     }
     @objc func toggleMonitorFocus(_ sender: NSButton) {
         monitorFocusEnabled = sender.state == .on
@@ -988,10 +1212,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func updateMonitorFocusTimer() {
         monitorFocusTimer?.invalidate(); monitorFocusTimer = nil
+        shortcuts.resetMonitorCopy()
+        updateShortcutTap(trusted: AXIsProcessTrusted())
         pointerDisplay = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }.flatMap(displayID)
         pendingPointerDisplay = nil
         pendingMonitorWindow = nil
         guard monitorFocusEnabled else { return }
+        shortcuts.prepareFirefoxSelection(in: NSWorkspace.shared.frontmostApplication)
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.checkMonitorEntry() }
         RunLoop.main.add(timer, forMode: .common)
         monitorFocusTimer = timer
@@ -1053,7 +1280,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Use the exact Quartz ID verified under the pointer. Raising an AX
         // window or setting AXFocusedWindow can itself promote sibling windows.
         guard !record.minimized, !record.app.isHidden, !record.app.isTerminated else { return }
+        let selection = shortcuts.sourceBeforeMonitorFocus()
         let status = WindowsQoLActivateWindowOnly(record.app.processIdentifier, record.element, windowID)
+        shortcuts.saveMonitorSelection(status == noErr ? selection : nil, for: record.app)
+        monitorCopyLog.notice("Handoff: source=\(selection?.app.bundleIdentifier ?? "-", privacy: .public) destination=\(record.app.bundleIdentifier ?? "-", privacy: .public) captured=\(selection?.selectedText != nil, privacy: .public) status=\(status, privacy: .public)")
         NSLog("Monitor focus: display=%u pid=%d window=%u status=%d", record.displayID, record.app.processIdentifier, windowID, status)
     }
 
@@ -1144,8 +1374,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if trusted && !titlebarZoom.isRunning { _ = titlebarZoom.start() }
         if !trusted && titlebarZoom.isRunning { titlebarZoom.stop() }
-        if shortcutsEnabled && trusted && !shortcuts.isRunning, shortcuts.start() { signature = "" }
-        if (!shortcutsEnabled || !trusted) && shortcuts.isRunning { shortcuts.stop(); signature = "" }
+        updateShortcutTap(trusted: trusted)
+        if monitorFocusEnabled { shortcuts.prepareFirefoxSelection(in: NSWorkspace.shared.frontmostApplication) }
         records = trusted ? windows(previous: records) : []
         if trusted { keepMaximizedWindowsAboveTaskbars() }
         let frontmost = frontmostWindowsByDisplay(records, useCachedFrames: true)
