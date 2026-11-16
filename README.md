@@ -84,7 +84,12 @@ The menu-bar menu contains **Settings…**, **Reload Windows QoL** and **Quit Wi
 | **General** | Open at login. Requires macOS 13 or later; macOS may require approval. |
 | **Taskbar** | Layout, spacing, monitor-entry focus and primary-taskbar pins. |
 | **Shortcuts** | Enable or disable the Windows-style Fn shortcuts. |
+| **Scrolling** | Set vertical scroll direction separately for a standard mouse wheel and a trackpad. |
 | **Permissions** | Check Accessibility and screen-capture access and request permission. |
+
+Both scroll controls default to **Follow macOS**. To move toward the bottom of a page by rolling the mouse wheel down or swiping up with two fingers, choose **Traditional** for the mouse and **Natural** for the trackpad. The choices take effect immediately, are saved in Windows QoL, and apply while it is running. macOS's Natural scrolling setting stays as it is. Horizontal scrolling and keyboard input are unaffected.
+
+Windows QoL distinguishes standard wheel events from continuous scrolling. A Magic Mouse or a mouse with a smooth-scrolling driver may follow the trackpad control instead.
 
 **Reload** quits normally and reopens the existing build. It does not compile source changes. After updating the source, quit the app, run `./scripts/build.sh`, then reopen `build/Windows QoL.app`.
 
@@ -94,7 +99,7 @@ Windows QoL uses macOS permissions to work with other apps. Grant access through
 
 | Permission | Used for |
 | --- | --- |
-| **Accessibility** | Detecting, focusing, minimizing, moving and resizing windows; reading Dock badges; handling Fn shortcuts and title-bar double-clicks. |
+| **Accessibility** | Detecting, focusing, minimizing, moving and resizing windows; reading Dock badges; handling Fn shortcuts, title-bar double-clicks and scroll overrides. |
 | **Screen Recording / Screen & System Audio Recording** | Window thumbnails and display screenshots. This permission grants broader screen access. |
 | **Automation** | Controlling System Events for the Dock, and Finder or Terminal when opening new windows. macOS may prompt when you first use an action. |
 | **Finder extension enablement** | Showing **Open Terminal Here** in supported Finder context menus. |

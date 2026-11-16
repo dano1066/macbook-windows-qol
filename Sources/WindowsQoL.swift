@@ -867,11 +867,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var selectedSettingsCategory = 0
     var lastExternalApplication: NSRunningApplication?
     var shortcutStatusLabel: NSTextField?
+    var scrollStatusLabel: NSTextField?
     var accessibilityStatus: NSTextField?
     var screenCaptureStatus: NSTextField?
     var loginStatusLabel: NSTextField?
     var loginButton: NSButton?
     let shortcuts = WindowsShortcuts()
+    let scrollDirection = ScrollDirectionOverride()
     let titlebarZoom = TitlebarZoom()
     let dockBadges = DockBadges()
     var badges: [String: String] = [:]
@@ -986,6 +988,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         secureFnTimer?.invalidate(); secureInputNotice?.close()
         startupDockRequest?.cancel()
         shortcuts.stop()
+        scrollDirection.stop()
         titlebarZoom.stop()
         let defaults = UserDefaults.standard
         let backup = defaults.dictionary(forKey: dockBackupKey)
@@ -1038,7 +1041,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "Windows QoL Settings"; window.isReleasedWhenClosed = false
         let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 190, height: 540))
         sidebar.material = .sidebar; sidebar.blendingMode = .behindWindow; sidebar.state = .active
-        let categories = [("General", "gearshape"), ("Taskbar", "rectangle.bottomthird.inset.filled"), ("Shortcuts", "keyboard"), ("Permissions", "lock.shield")]
+        let categories = [("General", "gearshape"), ("Taskbar", "rectangle.bottomthird.inset.filled"), ("Shortcuts", "keyboard"), ("Scrolling", "arrow.up.arrow.down"), ("Permissions", "lock.shield")]
         sidebarButtons = []
         for (index, category) in categories.enumerated() {
             let button = NSButton(title: category.0, target: self, action: #selector(selectSettingsCategory(_:)))
@@ -1059,7 +1062,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let content = settingsContent else { return }
         selectedSettingsCategory = category
         content.subviews.forEach { $0.removeFromSuperview() }
-        accessibilityStatus = nil; screenCaptureStatus = nil; loginStatusLabel = nil; loginButton = nil; shortcutStatusLabel = nil
+        accessibilityStatus = nil; screenCaptureStatus = nil; loginStatusLabel = nil; loginButton = nil; shortcutStatusLabel = nil; scrollStatusLabel = nil
         for button in sidebarButtons {
             button.layer?.backgroundColor = (button.tag == category ? NSColor.controlAccentColor.withAlphaComponent(0.22) : NSColor.clear).cgColor
         }
@@ -1122,9 +1125,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text("Fn-C/V/X: copy, paste, cut. Fn-A: select all. Fn-Z/Y: undo and redo. Fn-F: find. Fn-E: new Finder window.", y: 214, height: 72)
             text("Fn-S: screenshot of the current display. Fn-Shift-S: select an area. Both copy to the clipboard.", y: 145, height: 55)
             text("Fn-C and Fn-A replace macOS shortcuts while enabled.", y: 95)
+        case 3:
+            heading("Scrolling")
+            text("Choose how each device scrolls up and down. These settings take effect immediately and leave your macOS settings alone.", y: 306, height: 46)
+            let rows: [(String, ScrollDirection)] = [
+                ("Mouse scroll direction", scrollDirection.mouse),
+                ("Trackpad scroll direction", scrollDirection.trackpad),
+            ]
+            for (index, row) in rows.enumerated() {
+                let y = 266 - CGFloat(index) * 42
+                let label = NSTextField(labelWithString: row.0)
+                label.frame = NSRect(x: 30, y: y, width: 180, height: 22)
+                let popup = NSPopUpButton(frame: NSRect(x: 218, y: y - 2, width: 205, height: 28), pullsDown: false)
+                popup.addItems(withTitles: ScrollDirection.allCases.map(\.title))
+                popup.selectItem(withTitle: row.1.title)
+                popup.setAccessibilityLabel(row.0)
+                popup.tag = index; popup.target = self; popup.action = #selector(changeScrollDirection(_:))
+                content.addSubview(label); content.addSubview(popup)
+            }
+            text("For wheel down and a two-finger swipe up to both go toward the bottom of a page, choose Traditional for the mouse and Natural for the trackpad.", y: 139, height: 62)
+            text("The mouse setting applies to standard wheels. Smooth-scrolling mice such as Magic Mouse may follow the trackpad setting.", y: 77, height: 52)
+            let state = NSTextField(labelWithString: "")
+            state.textColor = .secondaryLabelColor; state.font = .systemFont(ofSize: 11)
+            state.frame = NSRect(x: 30, y: 52, width: 450, height: 16)
+            content.addSubview(state); scrollStatusLabel = state
         default:
             heading("Permissions")
-            text("Accessibility is needed for window controls and Fn shortcuts.", y: 300)
+            text("Accessibility is needed for window controls, Fn shortcuts and scroll overrides.", y: 300)
             let ax = NSTextField(labelWithString: ""); ax.frame = NSRect(x: 30, y: 268, width: 280, height: 20); content.addSubview(ax)
             accessibilityStatus = ax; _ = button("Enable Accessibility…", y: 223, action: #selector(requestAccessibilityFromSettings), width: 190)
             text("Screen capture is needed for screenshots and previews. It grants broader screen access.", y: 149, height: 50)
@@ -1133,6 +1160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text("macOS manages permissions; changes may require reopening the app.", y: 22)
         }
         for view in content.subviews { view.setFrameOrigin(NSPoint(x: view.frame.minX, y: view.frame.minY + 120)) }
+        updatePermissionStatuses()
+    }
+    @objc private func changeScrollDirection(_ sender: NSPopUpButton) {
+        let directions = ScrollDirection.allCases
+        guard directions.indices.contains(sender.indexOfSelectedItem) else { return }
+        scrollDirection.set(directions[sender.indexOfSelectedItem], trackpad: sender.tag == 1)
+        scrollDirection.update(trusted: AXIsProcessTrusted())
         updatePermissionStatuses()
     }
     @objc private func changeTaskbarLayout(_ sender: NSPopUpButton) {
@@ -1147,6 +1181,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func updatePermissionStatuses() {
         shortcutStatusLabel?.stringValue = shortcutsEnabled ? (shortcuts.isRunning ? "Status: Active" : "Status: Unavailable — check Accessibility permission") : "Status: Off"
+        if let label = scrollStatusLabel {
+            label.stringValue = !scrollDirection.hasOverride ? "Status: Following macOS" :
+                scrollDirection.isRunning ? "Status: Active" : "Status: Unavailable — check Accessibility in Settings → Permissions"
+        }
         accessibilityStatus?.stringValue = AXIsProcessTrusted() ? "Status: Enabled" : "Status: Not enabled"
         screenCaptureStatus?.stringValue = CGPreflightScreenCaptureAccess() ? "Status: Enabled" : "Status: Not enabled"
         if #available(macOS 13.0, *) {
@@ -1361,8 +1399,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func displaysChanged() { closeHover(); for panel in panels.values { panel.close() }; panels.removeAll(); signature = ""; updateMonitorFocusTimer(); refresh() }
     @objc func refresh() {
         guard !reorderingPins else { return }
-        if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
         let trusted = AXIsProcessTrusted()
+        scrollDirection.update(trusted: trusted)
+        if permissionsWindow?.isVisible == true { updatePermissionStatuses() }
         let latestBadges = trusted ? dockBadges.read() : [:]
         if latestBadges != badges {
             badges = latestBadges
@@ -2119,7 +2158,12 @@ final class PreviewButtonCell: NSButtonCell {
 }
 
 final class WindowButton: NSButton { var record: WindowRecord? }
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+@main
+enum WindowsQoL {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

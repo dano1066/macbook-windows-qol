@@ -24,7 +24,7 @@ cat > "$EXT/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - --entitlements Sources/FinderExtension.entitlements -r '=designated => identifier "local.dan.windowsqol.finder"' "$EXT"
 clang -O2 -c Sources/WindowActivation.c -o build/WindowActivation.o
-swiftc -swift-version 5 -O -import-objc-header Sources/WindowActivation.h Sources/WindowsQoL.swift build/WindowActivation.o -o "$APP/Contents/MacOS/WindowsQoL" -framework AppKit -framework ApplicationServices
+swiftc -swift-version 5 -O -import-objc-header Sources/WindowActivation.h Sources/WindowsQoL.swift Sources/ScrollDirection.swift build/WindowActivation.o -o "$APP/Contents/MacOS/WindowsQoL" -framework AppKit -framework ApplicationServices
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
